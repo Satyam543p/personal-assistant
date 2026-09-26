@@ -314,6 +314,11 @@ class JarvisDaemon(IPCHandler):
         self.port = PORT
         self.timer_manager = IdleTimerManager(default_timeout=IDLE_UNLOAD_TIMEOUT)
         self.db = DatabaseManager()
+        try:
+            from assistant.context_engine import context_engine
+            context_engine.attach_db(self.db)
+        except Exception as e:
+            logger.debug(f"Failed attaching DB to context_engine: {e}")
         self.interpreter = get_interpreter()
         self.ipc_server = None
         self.is_running = False

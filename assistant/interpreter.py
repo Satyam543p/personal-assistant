@@ -133,8 +133,12 @@ def split_composite_query(query: str) -> list[str]:
     e.g. 'open brave and open spotify' -> ['open brave', 'open spotify']
     """
     q_clean = query.strip()
-    # Preserved compound idioms (e.g. 'open youtube and play <song>')
-    if re.search(r"^(?:could\s+you\s+|can\s+you\s+|please\s+)?open\s+youtube\s+(?:and\s+)?play\s+", q_clean, re.IGNORECASE):
+    # Preserved compound idioms (e.g. 'open brave/youtube and play <song>')
+    if re.search(r"^(?:could\s+you\s+|can\s+you\s+|please\s+)?open\s+(?:brave|chrome|youtube|spotify|edge|firefox)\s+(?:and\s+)?play\s+", q_clean, re.IGNORECASE):
+        return [q_clean]
+
+    # Don't split search queries containing conjunctions
+    if re.search(r"^(?:search\s+for|google|find|lookup)\s+", q_clean, re.IGNORECASE):
         return [q_clean]
 
     parts = re.split(r"\b(?:and\s+then|and\s+also|and|then|aur\s+phir|aur|saath\s+me)\b|[,;]\s*", q_clean, flags=re.IGNORECASE)
@@ -145,9 +149,10 @@ def split_composite_query(query: str) -> list[str]:
             valid_parts.append(p_strip)
 
     if len(valid_parts) >= 2:
-        action_verbs = ("open", "play", "start", "launch", "run", "take", "show", "switch", "lock", "mute", "unmute", "stop", "pause", "kholo", "chalao", "bajao", "dikhao")
+        action_verbs = ("open", "play", "start", "launch", "run", "take", "show", "switch", "lock", "mute", "unmute", "stop", "pause", "kholo", "chalao", "bajao", "dikhao", "capture", "close", "band")
+        # Every candidate part must contain an explicit action verb to be an independent task
         action_count = sum(1 for p in valid_parts if any(v in p.lower().split() or p.lower().startswith(v) for v in action_verbs))
-        if action_count >= 2:
+        if action_count >= 2 and action_count == len(valid_parts):
             return valid_parts
 
     return [q_clean]

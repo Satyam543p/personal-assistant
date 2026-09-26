@@ -71,6 +71,12 @@ class ContextEngine(ContextProvider):
 
         self._load_from_db()
 
+    def attach_db(self, db_manager):
+        """Attaches a DatabaseManager instance and loads persisted history."""
+        self.db = db_manager
+        self._load_from_db()
+        logger.info(f"ContextEngine: Attached DB and restored {len(self.recent_turns)} turns.")
+
     def _load_from_db(self):
         """Restores recent state from SQLite if available."""
         if not self.db:
@@ -160,27 +166,36 @@ class ContextEngine(ContextProvider):
         # Turn 2 is a bare song name like 'i wanna be yours', 'believer', 'starboy'
         # -------------------------------------------------------------
         is_media_context = (
-            last_intent in ("play_media", "search_youtube", "watch_video", "open_app") and
-            any(w in last_query for w in ("play", "song", "youtube", "music", "brave", "gana", "video", "track"))
-        ) or any(w in last_response for w in ("which song", "what song", "youtube", "music", "play"))
+            last_intent in ("play_media", "search_youtube", "watch_video") or
+            (last_intent == "open_app" and any(w in last_query for w in ("youtube", "spotify", "music", "song", "soundcloud", "brave"))) or
+            any(phrase in last_response for phrase in ("which song", "what song", "what would you like to hear", "what song do you want", "playing on youtube"))
+        )
 
         if is_media_context:
             # If the query contains explicit system action verbs or conjunctions, it's an independent command, not a song title
-            action_verbs = ("open", "take", "screenshot", "show", "desktop", "switch", "lock", "organize", "pdf", "git", "run", "search", "browse", "list", "schedule", "delete", "kholo", "dikhao")
+            action_verbs = ("open", "take", "screenshot", "show", "desktop", "switch", "lock", "organize", "pdf", "git", "run", "search", "browse", "list", "schedule", "delete", "kholo", "dikhao", "set", "make", "create", "turn")
             if any(v in q_lower.split() for v in action_verbs) or " and " in q_lower or " aur " in q_lower or " then " in q_lower:
                 return None
 
-            # Check if this query is a likely song title or media follow-up:
-            # Not a generic command (not 'stop', 'exit', 'help', 'who are you')
-            if not re.search(r"\b(who are you|what can you do|help|stop|exit|quit|hi|hello|hey)\b", q_lower):
-                # Clean filler phrases if user said 'that is song ... i wanna be yours'
-                song_candidate = q_clean
-                m_lead = re.search(r"(?:that is|it is|play|the song is|song name is|song|gana)?\s*(.+)", q_clean, re.IGNORECASE)
-                if m_lead:
-                    song_candidate = m_lead.group(1).strip()
-                # Remove trailing browser/youtube mentions from title
-                song_candidate = re.sub(r"\s+(?:on\s+youtube|in\s+brave|on\s+brave|in\s+youtube)$", "", song_candidate, flags=re.IGNORECASE).strip()
+            # Exclude conversational responses, negations, questions, and commands
+            non_media_phrases = {
+                "no", "nope", "cancel", "nevermind", "wait", "later", "don't", "dont", "yes", "yeah",
+                "sure", "ok", "okay", "fine", "what", "how", "why", "when", "where", "volume",
+                "mute", "unmute", "thanks", "thank you", "stop", "exit", "quit", "help", "who are you",
+                "what can you do", "hi", "hello", "hey", "nothing", "nothing played", "not working"
+            }
+            if q_lower in non_media_phrases or re.search(r"^(who|what|how|why|when|where|can you|could you)\b", q_lower):
+                return None
 
+            # Clean filler phrases if user said 'that is song ... i wanna be yours'
+            song_candidate = q_clean
+            m_lead = re.search(r"(?:that is|it is|play|the song is|song name is|song|gana)?\s*(.+)", q_clean, re.IGNORECASE)
+            if m_lead:
+                song_candidate = m_lead.group(1).strip()
+            # Remove trailing browser/youtube mentions from title
+            song_candidate = re.sub(r"\s+(?:on\s+youtube|in\s+brave|on\s+brave|in\s+youtube)$", "", song_candidate, flags=re.IGNORECASE).strip()
+
+            if len(song_candidate) >= 2 and not song_candidate.lower() in non_media_phrases:
                 browser = self.active_entities.get("last_browser") or "brave"
                 platform = self.active_entities.get("last_media_platform") or "youtube"
 
@@ -193,7 +208,7 @@ class ContextEngine(ContextProvider):
                         "browser": browser
                     },
                     "resolved_reference": song_candidate,
-                    "confidence": 0.98,
+                    "confidence": 0.85,
                     "suggested_route": "tool",
                     "needs_clarification": False,
                     "metadata": {

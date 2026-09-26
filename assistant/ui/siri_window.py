@@ -250,16 +250,24 @@ class VoiceRecognitionWorker(QThread):
         try:
             import speech_recognition as sr
             r = sr.Recognizer()
+            r.operation_timeout = 8
             r.pause_threshold = 0.8
             r.phrase_threshold = 0.2
             r.dynamic_energy_threshold = False
             r.energy_threshold = 120
 
             mic_idx = find_working_microphone()
-            with sr.Microphone(device_index=mic_idx) as source:
-                r.adjust_for_ambient_noise(source, duration=0.4)
-                r.energy_threshold = max(70, min(r.energy_threshold + 40, 220))
-                audio = r.listen(source, timeout=7, phrase_time_limit=12)
+            try:
+                with sr.Microphone(device_index=mic_idx) as source:
+                    r.adjust_for_ambient_noise(source, duration=0.4)
+                    r.energy_threshold = max(70, min(r.energy_threshold + 40, 220))
+                    audio = r.listen(source, timeout=7, phrase_time_limit=12)
+            except Exception:
+                # Force refresh mic discovery if hardware state changed
+                mic_idx = find_working_microphone(force_refresh=True)
+                with sr.Microphone(device_index=mic_idx) as source:
+                    r.adjust_for_ambient_noise(source, duration=0.4)
+                    audio = r.listen(source, timeout=7, phrase_time_limit=12)
 
             text = None
             try:
@@ -958,6 +966,8 @@ class SiriWindow(QWidget):
         self.raise_()
         self.activateWindow()
         self._reset_inactivity_timer()
+        if self.wake_listener:
+            self.wake_listener.pause()
         play_chime("success")
         self._execute_query(query)
 
@@ -1040,6 +1050,8 @@ class SiriWindow(QWidget):
         self._execute_query(text)
 
     def _execute_query(self, query: str):
+        if self.wake_listener:
+            self.wake_listener.pause()
         self._add_chat_bubble(query, is_user=True)
         self._add_to_history(query)
 

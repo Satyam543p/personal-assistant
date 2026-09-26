@@ -995,7 +995,7 @@ class JarvisRouter(Router):
             title = entities.get("title") or resolved_ref or query
             platform = entities.get("platform", "youtube")
             browser = entities.get("browser", "brave")
-            res = MediaLauncher.play_media(title, platform=platform, browser=browser)
+            res = await asyncio.to_thread(MediaLauncher.play_media, title, platform=platform, browser=browser)
             self._write_routing_state(intent, "tool:play_media")
             if context_engine:
                 context_engine.active_entities["last_media_title"] = title
@@ -1012,16 +1012,18 @@ class JarvisRouter(Router):
 
         elif intent == "multi_task":
             tasks = entities.get("tasks", [])
-            logger.info(f"JarvisRouter: Executing {len(tasks)} multi-tasks simultaneously: {tasks}")
-            import asyncio
+            logger.info(f"JarvisRouter: Executing {len(tasks)} multi-tasks: {tasks}")
             from assistant.interpreter import RuleBasedInterpreter
 
             interpreter = RuleBasedInterpreter()
-            async def _run_subtask(t_query: str):
-                t_interp = await interpreter.interpret(t_query)
-                return await self.route(t_query, t_interp)
-
-            results = await asyncio.gather(*[_run_subtask(t) for t in tasks], return_exceptions=True)
+            results = []
+            for t in tasks:
+                try:
+                    t_interp = await interpreter.interpret(t)
+                    r = await self.route(t, t_interp)
+                    results.append(r)
+                except Exception as ex:
+                    results.append(ex)
 
             messages = []
             for idx, r in enumerate(results):
@@ -1050,17 +1052,17 @@ class JarvisRouter(Router):
             }
 
         elif intent == "open_app":
-            res = app_registry.launch(resolved_ref, browser=entities.get("browser"))
+            res = await asyncio.to_thread(app_registry.launch, resolved_ref, browser=entities.get("browser"))
             self._write_routing_state(intent, "tool:open_app")
             return res
 
         elif intent == "take_screenshot":
-            res = ScreenshotTool.capture()
+            res = await asyncio.to_thread(ScreenshotTool.capture)
             self._write_routing_state(intent, "tool:take_screenshot")
             return res
 
         elif intent == "show_desktop":
-            res = WindowControl.minimize_all()
+            res = await asyncio.to_thread(WindowControl.minimize_all)
             self._write_routing_state(intent, "tool:show_desktop")
             return res
 

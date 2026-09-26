@@ -182,7 +182,7 @@ class HTTPIPCClient(IPCClient):
         try:
             with urllib.request.urlopen(f"{self.base_url}/health", timeout=2) as response:
                 return response.status, response.read().decode("utf-8")
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
             return 0, str(e)
 
     def send_post(self, path: str, data: dict = None, timeout: int = 35) -> tuple[int, str]:
@@ -192,11 +192,15 @@ class HTTPIPCClient(IPCClient):
         json_data = json.dumps(data or {}).encode("utf-8")
         req.add_header("Content-Length", str(len(json_data)))
         
-        try:
-            with urllib.request.urlopen(req, data=json_data, timeout=timeout) as response:
-                return response.status, response.read().decode("utf-8")
-        except urllib.error.URLError as e:
-            return 0, str(e)
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, data=json_data, timeout=timeout) as response:
+                    return response.status, response.read().decode("utf-8")
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+                if attempt < 2 and any(kw in str(e).lower() for kw in ("refused", "reset", "failed to connect")):
+                    time.sleep(0.4)
+                    continue
+                return 0, str(e)
 
     def send_query(self, query: str, timeout: int = 35) -> tuple[int, str]:
         return self.send_post("/query", {"query": query}, timeout=timeout)

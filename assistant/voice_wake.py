@@ -27,12 +27,19 @@ WAKE_REGEX = re.compile(
 )
 
 
-def find_working_microphone() -> int:
+_CACHED_WORKING_MIC = None
+
+
+def find_working_microphone(force_refresh: bool = False) -> int:
     """
     Probes available audio input devices and returns the device index
     that has active, live energy input (bypassing dead virtual devices/Sound Mapper).
-    On Realtek Windows 11 hardware, Device index 6 or 7 represents the active physical mic.
+    Caches the result so ambient wake listener and UI voice capture share the exact same device.
     """
+    global _CACHED_WORKING_MIC
+    if _CACHED_WORKING_MIC is not None and not force_refresh:
+        return _CACHED_WORKING_MIC
+
     import speech_recognition as sr
     import audioop
 
@@ -60,14 +67,25 @@ def find_working_microphone() -> int:
         candidates.sort(reverse=True)
         best_idx, best_name = candidates[0][1], candidates[0][2]
         logger.info(f"Auto-selected live microphone [Index {best_idx}]: {best_name} (RMS={candidates[0][0]:.1f})")
+        _CACHED_WORKING_MIC = best_idx
         return best_idx
 
-    # Quiet room fallback: prefer Device 6 or Device 1
-    if len(names) > 6:
-        return 6
-    if len(names) > 1:
-        return 1
-    return 0
+    # Fallback to system default input device from PyAudio
+    try:
+        import pyaudio
+        p = pyaudio.PyAudio()
+        default_info = p.get_default_input_device_info()
+        p.terminate()
+        default_idx = default_info.get('index')
+        if default_idx is not None and default_idx < len(names):
+            _CACHED_WORKING_MIC = int(default_idx)
+            return _CACHED_WORKING_MIC
+    except Exception:
+        pass
+
+    fallback = 6 if len(names) > 6 else (1 if len(names) > 1 else 0)
+    _CACHED_WORKING_MIC = fallback
+    return fallback
 
 
 class WakeWordListener(QObject):
@@ -97,7 +115,7 @@ class WakeWordListener(QObject):
         self._paused = True
         if self._stop_listening_fn:
             try:
-                self._stop_listening_fn(wait_for_stop=False)
+                self._stop_listening_fn(wait_for_stop=True)
                 self._stop_listening_fn = None
             except Exception:
                 pass
@@ -123,7 +141,7 @@ class WakeWordListener(QObject):
         self._running = False
         if self._stop_listening_fn:
             try:
-                self._stop_listening_fn(wait_for_stop=False)
+                self._stop_listening_fn(wait_for_stop=True)
                 self._stop_listening_fn = None
             except Exception:
                 pass
@@ -146,6 +164,7 @@ class WakeWordListener(QObject):
             print(f"[Kate WakeWord] Binding to microphone device index: {self._mic_index}")
 
             r = sr.Recognizer()
+            r.operation_timeout = 8           # Socket timeout to prevent hung recognition threads
             r.pause_threshold = 0.5           # Snappy end-of-phrase detection
             r.phrase_threshold = 0.2          # Catch short quick words like "Kate"
             r.non_speaking_duration = 0.3
@@ -247,6 +266,8 @@ class WakeWordListener(QObject):
 
     def _trigger_with_command(self, cmd: str):
         """Play Siri chime and execute command on Qt main thread without asking user to repeat."""
+        if self._paused:
+            return
         now = time.time()
         if (now - self._last_trigger_time) < 1.0:
             return
@@ -270,6 +291,8 @@ class WakeWordListener(QObject):
 
     def _trigger(self):
         """Play Siri chime and summon window on Qt main thread."""
+        if self._paused:
+            return
         now = time.time()
         if (now - self._last_trigger_time) < 1.0:
             return

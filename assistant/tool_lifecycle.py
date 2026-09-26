@@ -220,7 +220,7 @@ if __name__ == '__main__':
 
         # Minimal safe environment
         clean_env = {
-            "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\Windows"),
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": tool_box_dir
         }

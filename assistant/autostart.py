@@ -1,4 +1,4 @@
-"""
+r"""
 Windows Startup Manager for Kate Assistant.
 Enables or disables silent background launch on Windows boot.
 Places a silent VBScript launcher in %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup.

@@ -161,7 +161,7 @@ class JarvisRouter(Router):
                     resolved_ref = pending_action["resolved_reference"]
                     
                     try:
-                        return await self._execute_tool_safely(intent, entities, resolved_ref, bypass_confirm=True)
+                        return await self._execute_tool_safely(intent, entities, resolved_ref, bypass_confirm=True, query=query)
                     except Exception as e:
                         return await self._handle_routing_failure(e, f"tool:{intent}", query, interpretation)
                 elif is_negation(query):
@@ -542,7 +542,7 @@ class JarvisRouter(Router):
             if resolved_ref and confidence >= self.threshold_high:
                 logger.info(f"Direct tool execution with resolved reference: {resolved_ref}")
                 try:
-                    return await self._execute_tool_safely(intent, entities, resolved_ref, metadata=interpretation.get("metadata"))
+                    return await self._execute_tool_safely(intent, entities, resolved_ref, metadata=interpretation.get("metadata"), query=query)
                 except Exception as e:
                     return await self._handle_routing_failure(e, f"tool:{intent}", query, interpretation)
             
@@ -576,7 +576,7 @@ class JarvisRouter(Router):
                 if resolved_ref:
                     # Executing tool with fallback
                     try:
-                        return await self._execute_tool_safely(intent, entities, resolved_ref)
+                        return await self._execute_tool_safely(intent, entities, resolved_ref, query=query)
                     except Exception as e:
                         return await self._handle_routing_failure(e, f"tool:{intent}", query, interpretation)
                 else:
@@ -891,12 +891,12 @@ class JarvisRouter(Router):
             "route": "failed"
         }
 
-    async def _execute_tool_safely(self, intent: str, entities: dict, resolved_ref: str, bypass_confirm: bool = False, metadata: dict | None = None) -> dict:
+    async def _execute_tool_safely(self, intent: str, entities: dict, resolved_ref: str, bypass_confirm: bool = False, metadata: dict | None = None, query: str = "") -> dict:
         intent_map = {
             "open_app": "open_app",
             "open_project": "open_project",
             "run_project": "open_project",
-            "search_web": "search_files",
+            "search_files": "search_files",
             "file_management": "read_file",
             "save_workspace": "save_workspace",
             "continue_working": "continue_working",

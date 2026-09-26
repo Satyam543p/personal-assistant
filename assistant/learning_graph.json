@@ -1,0 +1,60 @@
+{
+  "goals": {
+    "dsa_prep": {
+      "title": "Complete DSA Preparation",
+      "category": "study",
+      "required_skills": ["python", "data_structures", "algorithms"],
+      "skill_thresholds": {
+        "python": "intermediate",
+        "data_structures": "advanced",
+        "algorithms": "advanced"
+      },
+      "next_recommended_topics": [
+        "Arrays & Hashing",
+        "Two Pointers",
+        "Sliding Window",
+        "Trees & Graphs",
+        "Dynamic Programming"
+      ]
+    },
+    "assistant_dev": {
+      "title": "Jarvis Personal Assistant Development",
+      "category": "project",
+      "required_skills": ["python", "sqlite", "asyncio", "llm_tooling"],
+      "skill_thresholds": {
+        "python": "advanced",
+        "sqlite": "intermediate",
+        "asyncio": "intermediate",
+        "llm_tooling": "intermediate"
+      },
+      "next_recommended_topics": [
+        "SQLite WAL Mode",
+        "Subprocess Sandboxing",
+        "Embedding Search",
+        "Tool Lifecycle"
+      ]
+    },
+    "fullstack_web": {
+      "title": "Full-Stack Web Application Mastery",
+      "category": "skill",
+      "required_skills": ["web_fundamentals", "react", "rest_apis"],
+      "skill_thresholds": {
+        "web_fundamentals": "intermediate",
+        "react": "advanced",
+        "rest_apis": "intermediate"
+      },
+      "next_recommended_topics": [
+        "Component Lifecycle",
+        "State Management",
+        "REST API Design"
+      ]
+    }
+  },
+  "skill_prerequisites": {
+    "data_structures": ["python"],
+    "algorithms": ["data_structures"],
+    "asyncio": ["python"],
+    "llm_tooling": ["python", "asyncio"],
+    "react": ["web_fundamentals"]
+  }
+}

@@ -1,0 +1,18 @@
+# Core UI & Voice
+PyQt6>=6.4.0
+SpeechRecognition>=3.10.0
+PyAudio>=0.2.13
+edge-tts>=6.1.9
+pygame>=2.5.0
+
+# Server & IPC Daemon
+fastapi>=0.100.0
+uvicorn>=0.22.0
+pydantic>=2.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# System Automation & Hotkeys
+psutil>=5.9.0
+pynput>=1.7.6
+pywin32>=306; sys_platform == 'win32'

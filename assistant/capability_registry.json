@@ -1,0 +1,63 @@
+{
+  "open_app": {
+    "tools": [
+      "open_app"
+    ],
+    "status": "active"
+  },
+  "open_project": {
+    "tools": [
+      "open_project"
+    ],
+    "status": "active"
+  },
+  "search_files": {
+    "tools": [
+      "search_files"
+    ],
+    "status": "active"
+  },
+  "read_file": {
+    "tools": [
+      "read_file"
+    ],
+    "status": "active"
+  },
+  "write_file": {
+    "tools": [
+      "write_file"
+    ],
+    "status": "active"
+  },
+  "search_web": {
+    "tools": [
+      "search_web"
+    ],
+    "status": "active"
+  },
+  "autonomous_research": {
+    "tools": [
+      "research_topic",
+      "summarize_sources"
+    ],
+    "status": "active"
+  },
+  "health_calculation": {
+    "tools": [],
+    "status": "missing"
+  },
+  "crypto_lookup": {
+    "tools": [],
+    "status": "missing"
+  },
+  "send_email": {
+    "tools": [],
+    "status": "not_planned"
+  },
+  "health_metrics": {
+    "tools": [
+      "calculate_bmi"
+    ],
+    "status": "active"
+  }
+}

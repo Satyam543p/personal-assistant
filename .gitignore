@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Environments
+.env
+.env.*
+env/
+venv/
+ENV/
+
+# Databases and Local State
+*.db
+*.sqlite
+*.sqlite3
+assistant/jarvis.db
+
+# Logs
+*.log
+assistant/daemon.log
+jarvis_launch.log
+launch_debug.log
+
+# Operating System & IDE Files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Temporary scratch
+scratch/
+
+assistant/backups/
+*.mp3
+

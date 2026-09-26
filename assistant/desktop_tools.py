@@ -1,0 +1,456 @@
+"""
+Desktop Capabilities Suite for Kate.
+Provides:
+  - Window & Screen Control (switch window, minimize all, maximize, close window)
+  - Full-screen & Active-window Screenshot capture
+  - Master Audio Volume & Media Playback Control (play/pause/stop)
+  - Workstation Lock & Power Safety Guards
+  - Smart Folder Organizer (Downloads / Desktop sorting)
+  - Automated YouTube Song Downloader (yt-dlp + ffmpeg)
+  - PDF Document Generation (ReportLab)
+"""
+
+import os
+import sys
+import time
+import logging
+import asyncio
+import subprocess
+import shutil
+
+logger = logging.getLogger("kate.desktop")
+
+
+# =====================================================================
+# 1. Window Control Suite
+# =====================================================================
+
+class WindowControl:
+    @staticmethod
+    def switch_to_window(title_query: str) -> dict:
+        """Finds window by title and brings it to the absolute foreground."""
+        try:
+            import win32gui
+            import win32con
+            import win32process
+
+            found_hwnd = None
+            title_query_lower = title_query.lower()
+
+            def enum_cb(hwnd, _):
+                nonlocal found_hwnd
+                if win32gui.IsWindowVisible(hwnd):
+                    txt = win32gui.GetWindowText(hwnd)
+                    if txt and title_query_lower in txt.lower():
+                        found_hwnd = hwnd
+                        return False
+                return True
+
+            try:
+                win32gui.EnumWindows(enum_cb, None)
+            except Exception:
+                pass  # EnumWindows throws when returning False to stop
+
+            if found_hwnd:
+                win32gui.ShowWindow(found_hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(found_hwnd)
+                window_title = win32gui.GetWindowText(found_hwnd)
+                return {
+                    "status": "success",
+                    "message": f"Switched to '{window_title}', Satyam.",
+                    "hwnd": found_hwnd
+                }
+
+            return {
+                "status": "failure",
+                "message": f"I couldn't find an open window matching '{title_query}', Satyam."
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Window switch error: {e}"}
+
+    @staticmethod
+    def minimize_all() -> dict:
+        """Minimizes all windows to reveal the clean desktop."""
+        try:
+            import win32gui
+            import win32con
+            # Shell Minimize All via COM / Win32
+            import ctypes
+            # Win+D shortcut equivalent
+            user32 = ctypes.windll.user32
+            user32.keybd_event(0x5B, 0, 0, 0)        # Win down
+            user32.keybd_event(0x44, 0, 0, 0)        # D down
+            user32.keybd_event(0x44, 0, 2, 0)        # D up
+            user32.keybd_event(0x5B, 0, 2, 0)        # Win up
+            return {"status": "success", "message": "Showing your desktop, Satyam."}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    @staticmethod
+    def close_active_window() -> dict:
+        """Sends WM_CLOSE to the currently active foreground window."""
+        try:
+            import win32gui
+            import win32con
+            hwnd = win32gui.GetForegroundWindow()
+            if hwnd:
+                title = win32gui.GetWindowText(hwnd)
+                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                return {"status": "success", "message": f"Closed '{title}', Satyam."}
+            return {"status": "failure", "message": "No active window found."}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+
+# =====================================================================
+# 2. Screenshot Tool
+# =====================================================================
+
+class ScreenshotTool:
+    @staticmethod
+    def capture() -> dict:
+        """Captures full screen, saves PNG to Desktop/Screenshots, and copies to clipboard."""
+        try:
+            from PIL import ImageGrab
+            import io
+
+            desktop = os.path.expanduser(r"~\Desktop")
+            shot_dir = os.path.join(desktop, "Screenshots")
+            os.makedirs(shot_dir, exist_ok=True)
+
+            filename = f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.png"
+            file_path = os.path.join(shot_dir, filename)
+
+            img = ImageGrab.grab()
+            img.save(file_path, "PNG")
+
+            # Copy to Windows clipboard
+            try:
+                import win32clipboard
+                output = io.BytesIO()
+                img.convert("RGB").save(output, "BMP")
+                data = output.getvalue()[14:]  # Skip BMP header
+                output.close()
+                win32clipboard.OpenClipboard()
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+
+            return {
+                "status": "success",
+                "file_path": file_path,
+                "message": f"Screenshot captured and saved to your Desktop/Screenshots folder, Satyam."
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to take screenshot: {e}"}
+
+
+# =====================================================================
+# 3. Audio & Media Controls
+# =====================================================================
+
+class AudioMediaControl:
+    VK_MEDIA_PLAY_PAUSE = 0xCD
+    VK_MEDIA_STOP = 0xB2
+    VK_MEDIA_NEXT_TRACK = 0xB0
+    VK_MEDIA_PREV_TRACK = 0xB1
+    VK_VOLUME_MUTE = 0xAD
+    VK_VOLUME_DOWN = 0xAE
+    VK_VOLUME_UP = 0xAF
+
+    @classmethod
+    def send_media_key(cls, key_code: int):
+        import win32api
+        import win32con
+        win32api.keybd_event(key_code, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    @classmethod
+    def play_pause(cls) -> dict:
+        cls.send_media_key(cls.VK_MEDIA_PLAY_PAUSE)
+        return {"status": "success", "message": "Toggled playback, Satyam."}
+
+    @classmethod
+    def stop(cls) -> dict:
+        cls.send_media_key(cls.VK_MEDIA_STOP)
+        return {"status": "success", "message": "Stopped media playback, Satyam."}
+
+    @classmethod
+    def toggle_mute(cls) -> dict:
+        cls.send_media_key(cls.VK_VOLUME_MUTE)
+        return {"status": "success", "message": "Toggled mute, Satyam."}
+
+    @classmethod
+    def volume_step(cls, direction: str = "up", steps: int = 5) -> dict:
+        key = cls.VK_VOLUME_UP if direction == "up" else cls.VK_VOLUME_DOWN
+        for _ in range(steps):
+            cls.send_media_key(key)
+            time.sleep(0.02)
+        return {"status": "success", "message": f"Turned volume {direction}, Satyam."}
+
+
+# =====================================================================
+# 4. System & Hardware Controls
+# =====================================================================
+
+class SystemControl:
+    @staticmethod
+    def lock_pc() -> dict:
+        """Locks the workstation instantly."""
+        try:
+            import ctypes
+            ctypes.windll.user32.LockWorkStation()
+            return {"status": "success", "message": "Locking your PC, Satyam."}
+        except Exception as e:
+            return {"status": "error", "message": f"Lock failed: {e}"}
+
+    @staticmethod
+    def sleep_pc() -> dict:
+        """Puts Windows into sleep state."""
+        try:
+            import ctypes
+            # SetSuspendState(0, 0, 0) -> Standby/Sleep
+            ctypes.windll.PowrProf.SetSuspendState(0, 0, 0)
+            return {"status": "success", "message": "Putting your laptop to sleep, Satyam."}
+        except Exception as e:
+            return {"status": "error", "message": f"Sleep failed: {e}"}
+
+
+# =====================================================================
+# 5. Smart Folder Organizer
+# =====================================================================
+
+class FolderOrganizer:
+    CATEGORIES = {
+        "Images": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"],
+        "Documents": [".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".csv"],
+        "Archives": [".zip", ".rar", ".7z", ".tar", ".gz"],
+        "Installers": [".exe", ".msi", ".bat"],
+        "Code": [".py", ".js", ".ts", ".html", ".css", ".json", ".sql", ".cpp"]
+    }
+
+    @classmethod
+    def organize(cls, folder_path: str = None) -> dict:
+        """Sorts unorganized files in Downloads or Desktop into neat category subfolders."""
+        target = folder_path or os.path.expanduser(r"~\Downloads")
+        if not os.path.exists(target):
+            return {"status": "failure", "message": f"Folder {target} does not exist."}
+
+        moved_count = 0
+        try:
+            for item in os.listdir(target):
+                item_path = os.path.join(target, item)
+                if os.path.isfile(item_path):
+                    _, ext = os.path.splitext(item)
+                    ext_lower = ext.lower()
+
+                    for cat, ext_list in cls.CATEGORIES.items():
+                        if ext_lower in ext_list:
+                            cat_dir = os.path.join(target, cat)
+                            os.makedirs(cat_dir, exist_ok=True)
+                            dest_path = os.path.join(cat_dir, item)
+                            # Avoid overwrite
+                            if not os.path.exists(dest_path):
+                                shutil.move(item_path, dest_path)
+                                moved_count += 1
+                            break
+
+            return {
+                "status": "success",
+                "moved_files": moved_count,
+                "message": f"Organized {moved_count} files in your Downloads folder into neat categories, Satyam."
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Organization error: {e}"}
+
+
+# =====================================================================
+# 6. Automated YouTube Music Downloader
+# =====================================================================
+
+class SongDownloader:
+    @staticmethod
+    async def download_song(song_query: str) -> dict:
+        """
+        Searches YouTube for song query, extracts 320kbps MP3 via yt-dlp + ffmpeg,
+        and saves it to user's Music or Downloads folder.
+        """
+        try:
+            from assistant.youtube import ScrapeOrFallbackYouTubeProvider
+            from assistant.media_tools import JarvisMediaExtractor
+
+            # 1. Search YouTube
+            provider = ScrapeOrFallbackYouTubeProvider()
+            results = await provider.search(song_query, max_results=1)
+            if not results:
+                return {
+                    "status": "failure",
+                    "message": f"I couldn't locate '{song_query}' on YouTube, Satyam."
+                }
+
+            top_video = results[0]
+            video_url = top_video.url
+            video_title = top_video.title
+
+            # 2. Extract audio via yt-dlp
+            extractor = JarvisMediaExtractor()
+            music_dir = os.path.expanduser(r"~\Music")
+            if not os.path.exists(music_dir):
+                music_dir = os.path.expanduser(r"~\Downloads")
+
+            res = await extractor.extract_audio(video_url, output_format="mp3")
+            if res.get("status") == "success":
+                out_path = res.get("audio_path")
+                # Move to Music if not already there
+                if out_path and os.path.exists(out_path):
+                    final_dest = os.path.join(music_dir, os.path.basename(out_path))
+                    if out_path != final_dest and not os.path.exists(final_dest):
+                        try:
+                            shutil.move(out_path, final_dest)
+                            out_path = final_dest
+                        except Exception:
+                            pass
+
+                return {
+                    "status": "success",
+                    "title": video_title,
+                    "audio_path": out_path,
+                    "message": f"I've downloaded '{video_title}' to your Music folder, Satyam."
+                }
+            else:
+                return {
+                    "status": "failure",
+                    "message": f"Download encountered an issue: {res.get('message', 'unknown error')}"
+                }
+        except Exception as e:
+            return {"status": "error", "message": f"Song download error: {e}"}
+
+
+# =====================================================================
+# 7. ReportLab PDF Document Generator
+# =====================================================================
+
+class PDFReportGenerator:
+    @staticmethod
+    def create_pdf(title: str, content: str, filename: str = None) -> dict:
+        """Compiles formatted PDF document saved to Desktop."""
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.pdfgen import canvas
+
+            desktop = os.path.expanduser(r"~\Desktop")
+            fname = filename or f"{title.replace(' ', '_').lower()[:30]}_{int(time.time())}.pdf"
+            file_path = os.path.join(desktop, fname)
+
+            c = canvas.Canvas(file_path, pagesize=letter)
+            width, height = letter
+
+            # Header
+            c.setFont("Helvetica-Bold", 18)
+            c.drawString(54, height - 54, title)
+
+            c.setStrokeColorRGB(0.5, 0.5, 0.5)
+            c.setLineWidth(1)
+            c.line(54, height - 64, width - 54, height - 64)
+
+            # Body text
+            c.setFont("Helvetica", 11)
+            y = height - 90
+            lines = content.split("\n")
+            for line in lines:
+                if y < 54:
+                    c.showPage()
+                    c.setFont("Helvetica", 11)
+                    y = height - 54
+                c.drawString(54, y, line[:100])
+                y -= 16
+
+            c.save()
+            return {
+                "status": "success",
+                "file_path": file_path,
+                "message": f"I've compiled your research PDF '{fname}' and placed it on your Desktop, Satyam."
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"PDF creation failed: {e}"}
+
+
+# =====================================================================
+# 8. Media Launcher (User-Directed Music Platform & YouTube Default)
+# =====================================================================
+
+class MediaLauncher:
+    @staticmethod
+    def play_media(title: str, platform: str = "youtube", browser: str = "brave") -> dict:
+        """
+        Plays requested song, music, or video on user-directed platform.
+        Defaults directly to YouTube (in Brave browser) if platform is unspecified.
+        Supports Spotify, Soundcloud, Apple Music, and YouTube.
+        """
+        import urllib.parse
+        import webbrowser
+        title_clean = title.strip()
+        platform_lower = (platform or "youtube").lower().strip()
+        browser_lower = (browser or "brave").lower().strip()
+
+        # Fallback browser location check (Brave on Windows)
+        brave_path = os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe")
+        has_brave = os.path.exists(brave_path)
+
+        def _launch_url(url: str) -> str:
+            if ("brave" in browser_lower or (not browser and has_brave)) and has_brave:
+                try:
+                    subprocess.Popen([brave_path, url])
+                    return "Brave"
+                except Exception:
+                    pass
+            webbrowser.open(url)
+            return "your browser"
+
+        # Platform 1: Spotify
+        if "spotify" in platform_lower:
+            try:
+                encoded = urllib.parse.quote(title_clean)
+                spotify_uri = f"spotify:search:{encoded}"
+                subprocess.Popen(["cmd", "/c", "start", spotify_uri], shell=True)
+                return {
+                    "status": "success",
+                    "mode": "spotify_app",
+                    "message": f"Playing '{title_clean.title()}' on Spotify, Satyam!",
+                    "target": spotify_uri
+                }
+            except Exception:
+                web_url = f"https://open.spotify.com/search/{urllib.parse.quote(title_clean)}"
+                used_browser = _launch_url(web_url)
+                return {
+                    "status": "success",
+                    "mode": "spotify_web",
+                    "message": f"Playing '{title_clean.title()}' on Spotify in {used_browser}, Satyam!",
+                    "target": web_url
+                }
+
+        # Platform 2: Soundcloud
+        elif "soundcloud" in platform_lower:
+            web_url = f"https://soundcloud.com/search?q={urllib.parse.quote(title_clean)}"
+            used_browser = _launch_url(web_url)
+            return {
+                "status": "success",
+                "mode": "soundcloud",
+                "message": f"Playing '{title_clean.title()}' on SoundCloud in {used_browser}, Satyam!",
+                "target": web_url
+            }
+
+        # Platform 3: Default directly to YouTube
+        else:
+            yt_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(title_clean)}"
+            used_browser = _launch_url(yt_url)
+            return {
+                "status": "success",
+                "mode": "youtube",
+                "message": f"Playing '{title_clean.title()}' on YouTube in {used_browser}, Satyam!",
+                "target": yt_url
+            }
+

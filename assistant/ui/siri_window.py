@@ -322,42 +322,50 @@ class VoiceRecognitionWorker(QThread):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Clickable Siri Glow Orb (The Oval Globe)
+# Clickable Liquid Mercury Glowing Orb
 # ─────────────────────────────────────────────────────────────────────────────
 
-class SiriGlowOrb(QWidget):
+class LiquidMercuryOrb(QWidget):
     """
-    Apple Siri iridescent animated glowing orb.
-    Interactive: Clicking expands/collapses the full Companion Hub!
+    Liquid Mercury Floating Orb:
+      - Photorealistic liquid metal / quicksilver shader aesthetic
+      - Surface tension ripple waves responding dynamically to voice & sound
+      - Rotating constellation orbit nodes during 'thinking' / query processing
+      - Pure standalone floating droplet with zero surrounding box/pill
     """
     clicked = pyqtSignal()
 
-    def __init__(self, parent=None, size=54):
+    def __init__(self, parent=None, size=80):
         super().__init__(parent)
         self.setFixedSize(size, size)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setToolTip("Click to expand Chat & Settings Companion Hub")
+        self.setToolTip("Kate (Click for Chat & Settings)")
         self.phase = 0.0
         self.current_state = "idle"  # idle, listening, thinking, speaking, waiting_permission
         self.is_hovered = False
+        self.audio_energy = 0.0
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_animation)
-        self.timer.start(25)  # 40 FPS
+        self.timer.start(20)  # 50 FPS silky smooth animation
 
     def set_state(self, state: str):
         self.current_state = state
         self.update()
 
+    def set_audio_energy(self, level: float):
+        self.audio_energy = max(0.0, min(1.0, level))
+        self.update()
+
     def _update_animation(self):
         speeds = {
-            "thinking": 0.09,
-            "listening": 0.07,
-            "speaking": 0.06,
-            "waiting_permission": 0.08,
-            "idle": 0.03
+            "thinking": 0.08,
+            "listening": 0.09,
+            "speaking": 0.07,
+            "waiting_permission": 0.06,
+            "idle": 0.025
         }
-        self.phase = (self.phase + speeds.get(self.current_state, 0.03)) % (2 * math.pi)
+        self.phase = (self.phase + speeds.get(self.current_state, 0.025)) % (2 * math.pi)
         self.update()
 
     def enterEvent(self, event):
@@ -372,9 +380,16 @@ class SiriGlowOrb(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            play_chime("confirm")
-            self.clicked.emit()
+            self._press_pos = event.globalPosition().toPoint()
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and hasattr(self, "_press_pos"):
+            diff = (event.globalPosition().toPoint() - self._press_pos).manhattanLength()
+            if diff < 6:
+                play_chime("confirm")
+                self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -383,82 +398,137 @@ class SiriGlowOrb(QWidget):
         cx, cy = w / 2.0, h / 2.0
 
         is_listening = self.current_state == "listening"
-        is_dynamic = self.current_state in ("thinking", "active", "listening", "speaking", "waiting_permission")
-        pulse = math.sin(self.phase * 2.0) * (3.0 if is_dynamic else (2.0 if self.is_hovered else 0.8))
-        radius = (min(w, h) / 2.0) - 5.0 + pulse
+        is_thinking = self.current_state == "thinking"
+        is_speaking = self.current_state == "speaking"
+        is_permission = self.current_state == "waiting_permission"
 
-        # 1. Outer Ambient Glow / Halo
-        halo_alpha = 140 if is_listening else (110 if is_dynamic else (70 if self.is_hovered else 35))
-        halo_grad = QRadialGradient(cx, cy, radius + 12.0)
-        halo_grad.setColorAt(0.0, QColor(0, 180, 255, halo_alpha))
-        halo_grad.setColorAt(0.5, QColor(140, 50, 255, halo_alpha // 2))
+        # Base radius
+        base_radius = (min(w, h) / 2.0) - 12.0
+        if self.is_hovered:
+            base_radius += 1.5
+
+        # ── 1. Outer Platinum-Silver Luminescence / Ambient Glow ────────
+        halo_alpha = 150 if is_listening else (130 if is_thinking else (100 if is_speaking else (70 if self.is_hovered else 45)))
+        halo_r = base_radius + 11.0
+        halo_grad = QRadialGradient(cx, cy, halo_r)
+        if is_permission:
+            halo_grad.setColorAt(0.0, QColor(255, 190, 60, halo_alpha))
+            halo_grad.setColorAt(0.6, QColor(255, 100, 40, halo_alpha // 2))
+        elif is_listening:
+            halo_grad.setColorAt(0.0, QColor(220, 240, 255, halo_alpha))
+            halo_grad.setColorAt(0.5, QColor(160, 200, 255, halo_alpha // 2))
+        else:
+            halo_grad.setColorAt(0.0, QColor(240, 245, 255, halo_alpha))
+            halo_grad.setColorAt(0.5, QColor(180, 195, 220, halo_alpha // 2))
         halo_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+
         painter.setBrush(QBrush(halo_grad))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(QRectF(cx - radius - 12, cy - radius - 12, (radius + 12) * 2, (radius + 12) * 2))
+        painter.drawEllipse(QRectF(cx - halo_r, cy - halo_r, halo_r * 2, halo_r * 2))
 
-        # 2. Base Dark Obsidian Spherical Body
-        base_grad = QRadialGradient(cx, cy, radius)
-        base_grad.setColorAt(0.0, QColor(18, 20, 28, 255))
-        base_grad.setColorAt(0.85, QColor(8, 10, 16, 255))
-        base_grad.setColorAt(1.0, QColor(2, 4, 8, 255))
-        painter.setBrush(QBrush(base_grad))
-        painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
+        # ── 2. Fluid Surface Wave Path (Liquid Mercury Droplet Physics) ──
+        wave_amp = 3.8 if is_listening else (2.4 if is_speaking else (1.4 if self.is_hovered else 0.8))
+        num_pts = 48
+        path = QPainterPath()
+        first_pt = None
 
-        # 3. macOS Siri Luminous Fluid Core (Amber + Sapphire + Cyan matching user photo)
-        rot_x = math.cos(self.phase) * (radius * 0.28)
-        rot_y = math.sin(self.phase) * (radius * 0.22)
-        fluid_grad = QRadialGradient(cx + rot_x, cy + rot_y, radius * 0.95)
+        for k in range(num_pts):
+            theta = k * (2.0 * math.pi / num_pts)
+            wave1 = math.sin(3.0 * theta + self.phase * 3.2) * wave_amp
+            wave2 = math.cos(5.0 * theta - self.phase * 2.1) * (wave_amp * 0.45)
+            r = base_radius + wave1 + wave2
+            px = cx + math.cos(theta) * r
+            py = cy + math.sin(theta) * r
+            if k == 0:
+                path.moveTo(px, py)
+                first_pt = (px, py)
+            else:
+                path.lineTo(px, py)
 
-        if self.current_state == "waiting_permission":
-            fluid_grad.setColorAt(0.0, QColor(255, 215, 0, 230))
-            fluid_grad.setColorAt(0.4, QColor(255, 120, 0, 210))
-            fluid_grad.setColorAt(0.8, QColor(220, 38, 38, 190))
-            fluid_grad.setColorAt(1.0, QColor(15, 15, 25, 230))
+        if first_pt:
+            path.lineTo(first_pt[0], first_pt[1])
+        path.closeSubpath()
+
+        # ── 3. Liquid Mercury Metallic Core ──────────────────────────────
+        core_grad = QRadialGradient(cx - base_radius * 0.22, cy - base_radius * 0.25, base_radius * 1.15)
+        if is_permission:
+            core_grad.setColorAt(0.0, QColor(255, 245, 200, 255))
+            core_grad.setColorAt(0.25, QColor(255, 195, 70, 250))
+            core_grad.setColorAt(0.60, QColor(220, 110, 20, 245))
+            core_grad.setColorAt(0.85, QColor(100, 40, 10, 250))
+            core_grad.setColorAt(1.0, QColor(20, 10, 5, 255))
         else:
-            fluid_grad.setColorAt(0.0, QColor(255, 210, 130, 240))  # Warm amber highlight
-            fluid_grad.setColorAt(0.25, QColor(0, 215, 255, 220))   # Cyan electric glow
-            fluid_grad.setColorAt(0.60, QColor(30, 80, 245, 220))   # Sapphire blue
-            fluid_grad.setColorAt(0.85, QColor(80, 30, 180, 190))   # Deep violet edge
-            fluid_grad.setColorAt(1.0, QColor(10, 12, 18, 245))    # Smoked glass shadow
+            # Pure Liquid Mercury / Quicksilver Platinum
+            core_grad.setColorAt(0.0, QColor(255, 255, 255, 255))   # Specular highlight
+            core_grad.setColorAt(0.18, QColor(241, 245, 249, 250))  # Liquid platinum
+            core_grad.setColorAt(0.42, QColor(203, 213, 225, 245))  # Silver chrome
+            core_grad.setColorAt(0.70, QColor(100, 116, 139, 245))  # Metallic steel
+            core_grad.setColorAt(0.88, QColor(30, 41, 59, 250))     # Dark graphite refraction
+            core_grad.setColorAt(1.0, QColor(8, 12, 18, 255))       # Deep obsidian liquid edge
 
-        painter.setBrush(QBrush(fluid_grad))
-        painter.drawEllipse(QRectF(cx - radius + 2, cy - radius + 2, (radius - 2) * 2, (radius - 2) * 2))
+        painter.setBrush(QBrush(core_grad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPath(path)
 
-        # 4. Constellation Mode (Animated rotating pearl nodes matching user photo)
-        if is_listening or self.current_state in ("speaking", "thinking"):
-            num_nodes = 6
-            orbit_r = radius * 0.55
+        # ── 4. Liquid Chromatic Iridescence Gleam ────────────────────────
+        gleam_x = cx + math.cos(self.phase * 1.5) * (base_radius * 0.25)
+        gleam_y = cy + math.sin(self.phase * 1.5) * (base_radius * 0.20)
+        gleam_grad = QRadialGradient(gleam_x, gleam_y, base_radius * 0.70)
+        gleam_grad.setColorAt(0.0, QColor(255, 255, 255, 130))
+        gleam_grad.setColorAt(0.35, QColor(186, 230, 253, 75))   # Icy cyan sheen
+        gleam_grad.setColorAt(0.70, QColor(216, 180, 254, 50))   # Soft violet dispersion
+        gleam_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setBrush(QBrush(gleam_grad))
+        painter.drawPath(path)
+
+        # ── 5. Specular Liquid Highlights (Zero-G Droplet Reflections) ───
+        hi_x = cx - base_radius * 0.28
+        hi_y = cy - base_radius * 0.32
+        hi_w = base_radius * 0.70
+        hi_h = base_radius * 0.45
+        hi_grad = QLinearGradient(hi_x, hi_y - hi_h / 2, hi_x, hi_y + hi_h / 2)
+        hi_grad.setColorAt(0.0, QColor(255, 255, 255, 240))
+        hi_grad.setColorAt(0.5, QColor(255, 255, 255, 110))
+        hi_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setBrush(QBrush(hi_grad))
+        painter.drawEllipse(QRectF(hi_x - hi_w / 2, hi_y - hi_h / 2, hi_w, hi_h))
+
+        # Secondary bottom bounce rim light
+        bounce_grad = QLinearGradient(cx, cy + base_radius * 0.5, cx, cy + base_radius)
+        bounce_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
+        bounce_grad.setColorAt(1.0, QColor(226, 232, 240, 110))
+        painter.setBrush(QBrush(bounce_grad))
+        painter.drawEllipse(QRectF(cx - base_radius * 0.6, cy + base_radius * 0.55, base_radius * 1.2, base_radius * 0.35))
+
+        # Precision liquid mercury edge stroke
+        edge_pen = QPen(QColor(255, 255, 255, 190), 1.2)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(edge_pen)
+        painter.drawPath(path)
+
+        # ── 6. Rotating Constellation Loading Ring (Processing / Thinking Mode) ──
+        # Exact reproduction of user reference photo media_1790488988537.png
+        if is_thinking:
+            num_nodes = 7
+            orbit_r = base_radius + 7.5
             for i in range(num_nodes):
-                ang = self.phase * 2.2 + (i * 2 * math.pi / num_nodes)
+                ang = self.phase * 3.0 + (i * 2.0 * math.pi / num_nodes)
                 nx = cx + math.cos(ang) * orbit_r
                 ny = cy + math.sin(ang) * orbit_r
-                node_size = 3.2 + 1.8 * math.sin(self.phase * 3.0 + i)
-                n_glow = QRadialGradient(nx, ny, node_size + 3.0)
-                n_glow.setColorAt(0.0, QColor(255, 255, 255, 255))
-                n_glow.setColorAt(0.5, QColor(160, 240, 255, 180))
-                n_glow.setColorAt(1.0, QColor(0, 180, 255, 0))
-                painter.setBrush(QBrush(n_glow))
+                node_size = 3.6 + 1.6 * math.sin(self.phase * 4.0 + i)
+
+                node_glow = QRadialGradient(nx, ny, node_size + 3.0)
+                node_glow.setColorAt(0.0, QColor(255, 255, 255, 255))
+                node_glow.setColorAt(0.5, QColor(226, 232, 240, 190))
+                node_glow.setColorAt(1.0, QColor(255, 255, 255, 0))
+
+                painter.setBrush(QBrush(node_glow))
+                painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawEllipse(QRectF(nx - node_size - 3, ny - node_size - 3, (node_size + 3) * 2, (node_size + 3) * 2))
 
-        # 5. Top Specular Glass Reflection
-        spec_grad = QLinearGradient(cx, cy - radius, cx, cy + radius * 0.4)
-        spec_grad.setColorAt(0.0, QColor(255, 255, 255, 160))
-        spec_grad.setColorAt(0.3, QColor(255, 255, 255, 40))
-        spec_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
-        painter.setBrush(QBrush(spec_grad))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(QRectF(cx - radius * 0.75, cy - radius * 0.90, radius * 1.5, radius * 0.85))
 
-        # 6. Ultra-Crisp Precision Metallic Rim (Bezel)
-        rim_grad = QLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius)
-        rim_grad.setColorAt(0.0, QColor(255, 255, 255, 210))
-        rim_grad.setColorAt(0.4, QColor(120, 140, 180, 120))
-        rim_grad.setColorAt(0.8, QColor(20, 25, 35, 180))
-        rim_grad.setColorAt(1.0, QColor(200, 220, 255, 170))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QBrush(rim_grad), 1.4))
-        painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
+# Backward compatibility alias
+SiriGlowOrb = LiquidMercuryOrb
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -718,21 +788,61 @@ class SiriWindow(QWidget):
         self.companion_hub.setObjectName("CompanionHub")
         self.companion_hub.setStyleSheet("""
             #CompanionHub {
-                background: rgba(9, 10, 15, 0.92);
-                border: 1px solid rgba(255, 255, 255, 0.13);
+                background: rgba(9, 10, 15, 0.94);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 26px;
             }
         """)
+        hub_shadow = QGraphicsDropShadowEffect(self.companion_hub)
+        hub_shadow.setBlurRadius(36)
+        hub_shadow.setColor(QColor(0, 0, 0, 220))
+        hub_shadow.setOffset(0, 8)
+        self.companion_hub.setGraphicsEffect(hub_shadow)
+
         hub_layout = QVBoxLayout(self.companion_hub)
         hub_layout.setContentsMargins(16, 14, 16, 14)
         hub_layout.setSpacing(10)
 
         # Hub Header
         hub_hdr = QHBoxLayout()
-        self.hub_badge = QLabel("✨ Kate Companion Hub", self.companion_hub)
-        self.hub_badge.setStyleSheet("color:#38BDF8; font-weight:bold; font-size:13px;")
+        self.hub_badge = QLabel("✨ Kate Assistant", self.companion_hub)
+        self.hub_badge.setStyleSheet("color:#E2E8F0; font-weight:bold; font-size:13px;")
         hub_hdr.addWidget(self.hub_badge)
+
+        self.status_label = QLabel("Ready", self.companion_hub)
+        self.status_label.setStyleSheet("color:#94A3B8; font-size:11px; margin-left:6px;")
+        hub_hdr.addWidget(self.status_label)
         hub_hdr.addStretch()
+
+        # Pin Button
+        self.pin_btn = QPushButton("📌", self.companion_hub)
+        self.pin_btn.setFixedSize(28, 28)
+        self.pin_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.pin_btn.setToolTip("Pin to Screen (Keep open indefinitely)")
+        self.pin_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 14px; font-size: 11px; color: #94A3B8;
+            }
+            QPushButton:hover { background: rgba(255, 255, 255, 0.16); color: #FFF; }
+        """)
+        self.pin_btn.clicked.connect(self._toggle_pin)
+        hub_hdr.addWidget(self.pin_btn)
+
+        # Speaker Mute Button
+        self.speaker_btn = QPushButton("🔊", self.companion_hub)
+        self.speaker_btn.setFixedSize(28, 28)
+        self.speaker_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.speaker_btn.setToolTip("Voice Output: ON (click to mute)")
+        self.speaker_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 14px; font-size: 12px;
+            }
+            QPushButton:hover { background: rgba(0, 245, 212, 0.25); }
+        """)
+        self.speaker_btn.clicked.connect(self._toggle_speaker)
+        hub_hdr.addWidget(self.speaker_btn)
 
         # History Button
         self.btn_history = QPushButton("📜 History", self.companion_hub)
@@ -767,7 +877,7 @@ class SiriWindow(QWidget):
         self.btn_collapse = QPushButton("✕", self.companion_hub)
         self.btn_collapse.setFixedSize(26, 26)
         self.btn_collapse.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_collapse.setToolTip("Collapse back to Voice Capsule")
+        self.btn_collapse.setToolTip("Collapse back to Floating Mercury Orb")
         self.btn_collapse.setStyleSheet("""
             QPushButton {
                 background: rgba(255, 255, 255, 0.08); color: #94A3B8;
@@ -775,7 +885,7 @@ class SiriWindow(QWidget):
             }
             QPushButton:hover { background: rgba(239, 68, 68, 0.35); color: #FFF; }
         """)
-        self.btn_collapse.clicked.connect(self._set_capsule_mode)
+        self.btn_collapse.clicked.connect(self._set_orb_mode)
         hub_hdr.addWidget(self.btn_collapse)
 
         hub_layout.addLayout(hub_hdr)
@@ -880,105 +990,57 @@ class SiriWindow(QWidget):
         self.companion_hub.hide()
         self.main_layout.addWidget(self.companion_hub)
 
-        # ── 4. Voice-First Siri Capsule Bar (Default Hands-Free View) ───────
-        self.voice_capsule = QFrame(self)
-        self.voice_capsule.setObjectName("VoiceCapsule")
-        self.voice_capsule.setStyleSheet("""
-            #VoiceCapsule {
-                background-color: rgba(10, 11, 16, 0.90);
-                border: 1px solid rgba(255, 255, 255, 0.15);
-                border-radius: 34px;
-            }
-        """)
-        self.voice_capsule.setFixedHeight(68)
+        # ── 4. Standalone Liquid Mercury Floating Orb (Zero surrounding clutter) ──
+        self.orb_container = QWidget(self)
+        self.orb_container.setObjectName("OrbContainer")
+        self.orb_container.setStyleSheet("background: transparent; border: none;")
+        orb_box = QVBoxLayout(self.orb_container)
+        orb_box.setContentsMargins(3, 3, 3, 3)
+        orb_box.setSpacing(0)
+        orb_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        capsule_shadow = QGraphicsDropShadowEffect(self.voice_capsule)
-        capsule_shadow.setBlurRadius(32)
-        capsule_shadow.setColor(QColor(0, 0, 0, 210))
-        capsule_shadow.setOffset(0, 8)
-        self.voice_capsule.setGraphicsEffect(capsule_shadow)
-
-        cap_l = QHBoxLayout(self.voice_capsule)
-        cap_l.setContentsMargins(8, 6, 14, 6)
-        cap_l.setSpacing(10)
-
-        # Clickable Glowing Oval Globe (The Gateway to the Hub)
-        self.orb = SiriGlowOrb(self.voice_capsule, size=54)
+        # Standalone Liquid Mercury Droplet (Click expands to Hub)
+        self.orb = LiquidMercuryOrb(self.orb_container, size=80)
         self.orb.clicked.connect(self.toggle_companion_hub)
-        cap_l.addWidget(self.orb)
+        orb_box.addWidget(self.orb)
 
-        # Voice Status & Live Soundwave
-        self.status_label = QLabel("Say 'Hey Kate' or press Ctrl+Space", self.voice_capsule)
-        self.status_label.setStyleSheet("color:#F8FAFC; font-size:13px; font-weight:500; font-family:'Segoe UI',system-ui,sans-serif;")
-        cap_l.addWidget(self.status_label)
-
-        self.soundwave = SiriSoundWave(self.voice_capsule)
-        cap_l.addWidget(self.soundwave)
-
-        # Pin Button
-        self.pin_btn = QPushButton("📌", self.voice_capsule)
-        self.pin_btn.setFixedSize(32, 32)
-        self.pin_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.pin_btn.setToolTip("Pin on screen (Keep open indefinitely)")
-        self.pin_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12);
-                border-radius: 16px; font-size: 12px; color: #94A3B8;
-            }
-            QPushButton:hover { background: rgba(255, 255, 255, 0.16); color: #FFF; }
-        """)
-        self.pin_btn.clicked.connect(self._toggle_pin)
-        cap_l.addWidget(self.pin_btn)
-
-        # Speaker Mute Button
-        self.speaker_btn = QPushButton("🔊", self.voice_capsule)
-        self.speaker_btn.setFixedSize(32, 32)
-        self.speaker_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.speaker_btn.setToolTip("Voice Output: ON (click to mute)")
-        self.speaker_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(0, 245, 212, 0.15); border: 1px solid rgba(0, 245, 212, 0.35);
-                border-radius: 16px; font-size: 13px;
-            }
-            QPushButton:hover { background: rgba(0, 245, 212, 0.3); }
-        """)
-        self.speaker_btn.clicked.connect(self._toggle_speaker)
-        cap_l.addWidget(self.speaker_btn)
-
-        self.main_layout.addWidget(self.voice_capsule)
+        self.main_layout.addWidget(self.orb_container)
 
     # ── Mode Transitions ───────────────────────────────────────────────────
 
     def _check_wake_watchdog(self):
         if self.wake_listener and getattr(self.wake_listener, "_paused", False):
             is_recording = hasattr(self, "_voice_worker") and self._voice_worker and self._voice_worker.isRunning()
-            if not is_recording and not self.soundwave.is_active:
+            if not is_recording and getattr(self.orb, "current_state", "idle") == "idle":
                 logger.info("Watchdog: Auto-resuming ambient wake_listener.")
                 self.wake_listener.resume()
 
-    def _set_capsule_mode(self):
-        """Switches to minimal voice-first Siri capsule mode."""
+    def _set_orb_mode(self):
+        """Switches to pure standalone floating liquid mercury orb mode (no surrounding pill)."""
         self.is_expanded = False
         self.companion_hub.hide()
-        self.voice_capsule.show()
-        self.setFixedWidth(340)
-        self.adjustSize()
+        self.toast_pill.hide()
+        self.permission_card.hide()
+        self.orb_container.show()
+        self.setFixedSize(86, 86)
         self._center_at_bottom()
 
+    def _set_capsule_mode(self):
+        self._set_orb_mode()
+
     def toggle_companion_hub(self):
-        """Toggles between Voice Capsule and Expanded Companion Hub on Globe Click."""
+        """Toggles between Standalone Mercury Orb and Expanded Companion Hub on Click."""
         if self.is_expanded:
-            self._set_capsule_mode()
+            self._set_orb_mode()
         else:
             self._set_expanded_mode()
 
     def _set_expanded_mode(self):
-        """Expands into full Companion Hub (Chat, History, Settings)."""
+        """Expands into full visionOS Grey-Black Glassmorphic Chat Deck."""
         self.is_expanded = True
-        self.voice_capsule.hide()
+        self.orb_container.hide()
         self.companion_hub.show()
-        self.setFixedWidth(460)
-        self.setFixedHeight(580)
+        self.setFixedSize(460, 580)
         self._center_at_bottom()
         self.hub_input.setFocus()
         self._reset_inactivity_timer()
@@ -1018,17 +1080,16 @@ class SiriWindow(QWidget):
             self._trigger_voice_capture()
         else:
             self.orb.set_state("idle")
-            self.soundwave.set_active(False)
-            self.status_label.setText("Say 'Hey Kate' or press Ctrl+Space")
+            self.status_label.setText("Ready")
 
     @pyqtSlot(str)
     def summon_with_command(self, query: str):
         """Invoked when user speaks wake word and command in one breath ('Hey Kate <command>')."""
         if self.is_expanded:
             self.hub_input.clear()
-            self._set_capsule_mode()
+            self._set_orb_mode()
         else:
-            self._set_capsule_mode()
+            self._set_orb_mode()
 
         self.show()
         self.raise_()
@@ -1042,10 +1103,9 @@ class SiriWindow(QWidget):
     @pyqtSlot()
     def summon_voice(self):
         """Invoked when ambient wake-word 'Hey Kate' is detected."""
-        # Mid-typing voice interruption: If user was typing, clear partial draft
         if self.is_expanded:
             self.hub_input.clear()
-            self._set_capsule_mode()
+            self._set_orb_mode()
         self.summon(start_voice=True)
 
     @pyqtSlot()
@@ -1067,13 +1127,12 @@ class SiriWindow(QWidget):
             self.summon(start_voice=True)
 
     def _trigger_voice_capture(self):
-        """Starts live microphone listening with Siri chime & animated wave."""
+        """Starts live microphone listening with liquid ripple animation."""
         if self.wake_listener:
             self.wake_listener.pause()
 
         play_chime("trigger")
         self.orb.set_state("listening")
-        self.soundwave.set_active(True)
         self.status_label.setText("Listening... speak now")
         self.toast_pill.hide()
 
@@ -1084,7 +1143,6 @@ class SiriWindow(QWidget):
 
     def _on_voice_recognized(self, text: str):
         play_chime("success")
-        self.soundwave.set_active(False)
         self.orb.set_state("thinking")
         self.status_label.setText("Thinking...")
 
@@ -1101,9 +1159,8 @@ class SiriWindow(QWidget):
         self._execute_query(text)
 
     def _on_voice_failed(self, err_msg: str):
-        self.soundwave.set_active(False)
         self.orb.set_state("idle")
-        self.status_label.setText("Couldn't hear you clearly")
+        self.status_label.setText("Ready")
         if self.wake_listener:
             self.wake_listener.resume()
         self._reset_inactivity_timer()

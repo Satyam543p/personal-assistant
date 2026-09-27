@@ -11,6 +11,7 @@ Combines hands-free voice-first operation with an expandable Companion Hub conta
 import math
 import sys
 import os
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 import re
 import time
 import asyncio
@@ -1156,6 +1157,10 @@ class SiriWindow(QWidget):
 
     def _trigger_voice_capture(self):
         """Starts live microphone listening with liquid ripple animation."""
+        if hasattr(self, "_voice_worker") and self._voice_worker and self._voice_worker.isRunning():
+            logger.info("Voice recognition worker already active, ignoring re-entrant trigger.")
+            return
+
         if self.wake_listener:
             self.wake_listener.pause()
 

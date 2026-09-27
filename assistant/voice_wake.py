@@ -115,7 +115,7 @@ class WakeWordListener(QObject):
         self._paused = True
         if self._stop_listening_fn:
             try:
-                self._stop_listening_fn(wait_for_stop=True)
+                self._stop_listening_fn(wait_for_stop=False)
                 self._stop_listening_fn = None
             except Exception:
                 pass
@@ -292,14 +292,15 @@ class WakeWordListener(QObject):
         except Exception:
             pass
 
-        if self._target_window:
+        if self.receivers(self.wake_command_detected) > 0:
+            self.wake_command_detected.emit(cmd)
+        elif self._target_window:
             QMetaObject.invokeMethod(
                 self._target_window,
                 "summon_with_command",
                 Qt.ConnectionType.QueuedConnection,
                 Q_ARG(str, cmd)
             )
-        self.wake_command_detected.emit(cmd)
 
     def _trigger(self):
         """Play Siri chime and summon window on Qt main thread."""
@@ -317,10 +318,11 @@ class WakeWordListener(QObject):
         except Exception:
             pass
 
-        if self._target_window:
+        if self.receivers(self.wake_word_detected) > 0:
+            self.wake_word_detected.emit()
+        elif self._target_window:
             QMetaObject.invokeMethod(
                 self._target_window,
                 "summon_voice",
                 Qt.ConnectionType.QueuedConnection
             )
-        self.wake_word_detected.emit()

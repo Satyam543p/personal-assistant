@@ -133,8 +133,8 @@ def split_composite_query(query: str) -> list[str]:
     e.g. 'open brave and open spotify' -> ['open brave', 'open spotify']
     """
     q_clean = query.strip()
-    # Preserved compound idioms (e.g. 'open brave/youtube and play <song>')
-    if re.search(r"^(?:could\s+you\s+|can\s+you\s+|please\s+)?open\s+(?:brave|chrome|youtube|spotify|edge|firefox)\s+(?:and\s+)?play\s+", q_clean, re.IGNORECASE):
+    # Preserved compound idioms (e.g. 'open youtube in brave and play <song>')
+    if re.search(r"^(?:could\s+you\s+|can\s+you\s+|please\s+)?open\s+(?:brave|chrome|youtube|spotify|edge|firefox)(?:\s+in\s+\w+)?\s+(?:and\s+)?play\s+", q_clean, re.IGNORECASE):
         return [q_clean]
 
     # Don't split search queries containing conjunctions
@@ -164,12 +164,15 @@ def extract_media_intent(query: str) -> dict | None:
     Supports user-directed platforms (Spotify, Soundcloud, YouTube) with YouTube as the primary default.
     """
     ql = query.lower().strip()
-    if re.search(r"^(?:play|pause|stop|next|previous)(?:\s+(?:track|video|music|song|playback))?$", ql):
+    # Only pause, stop, next, previous are pure playback controls without content
+    if re.search(r"^(?:pause|stop|next|previous)(?:\s+(?:track|video|music|song|playback))?$", ql):
         return None
 
     media_patterns = [
-        r"(?:open\s+youtube\s+(?:and\s+)?play\s+(.+))",
+        r"(?:open\s+youtube\s+(?:in\s+\w+\s+)?(?:and\s+)?play\s+(.+))",
+        r"(?:open\s+(?:brave|chrome|firefox|edge)\s+(?:and\s+)?(?:open\s+youtube\s+)?(?:and\s+)?play\s+(.+))",
         r"(?:play|stream|listen\s+to|put\s+on|blast)\s+(?:the\s+)?(?:song\s+|music\s+|track\s+)?(.+)",
+        r"^(?:play\s+music|play\s+a\s+song|play\s+some\s+music|play\s+something|gana\s+bajao|gana\s+chalao)$",
         r"(?:gana\s+(?:bajao|chalao|laga\s+do)|song\s+chalao)\s*(.+)?",
         r"(.+?)\s+(?:gana\s+)?(?:chalao|bajao|laga\s+do|play\s+karo)"
     ]
@@ -177,12 +180,19 @@ def extract_media_intent(query: str) -> dict | None:
     matched_title = None
     for pat in media_patterns:
         m = re.search(pat, ql)
-        if m and m.group(1):
-            matched_title = m.group(1).strip()
+        if m:
+            if m.groups() and m.group(1):
+                matched_title = m.group(1).strip()
+            else:
+                matched_title = "trending songs"
             break
 
     if not matched_title:
         return None
+
+    # If generic request like "music" or "a song", default to trending music
+    if matched_title in ("music", "some music", "a song", "songs", "gana", "koi gana", "something"):
+        matched_title = "trending songs"
 
     # Detect explicit platform
     platform = "youtube" # Default!
@@ -289,8 +299,8 @@ class RuleBasedInterpreter(LocalInterpreter):
             data["confidence"] = 0.95
             data["suggested_route"] = "tool"
 
-        # 4. Media Playback Control (Stop, Pause, Resume, Next, Play)
-        elif re.search(r"\b(?:stop|pause|resume|play)\s+(?:the\s+)?(?:video|music|song|track|playback)\b|\b(?:next|previous)\s+track\b|\b(?:video\s+roko|pause\s+karo|gana\s+roko|chalao)\b|\b(?:pause|resume)\b", query_lower):
+        # 4. Media Playback Control (Stop, Pause, Resume, Next)
+        elif re.search(r"\b(?:stop|pause|resume)\s+(?:the\s+)?(?:video|music|song|track|playback)\b|\b(?:next|previous)\s+track\b|\b(?:video\s+roko|pause\s+karo|gana\s+roko)\b|\b(?:pause|resume)\b", query_lower):
             data["intent"] = "control_media"
             action = "play_pause"
             if "stop" in query_lower or "roko" in query_lower:
@@ -410,25 +420,22 @@ class RuleBasedInterpreter(LocalInterpreter):
             data["suggested_route"] = "tool"
 
         # Match open project or app
-        elif re.search(r"\b(open|go to|cd to|view)\b", query_lower):
-            open_match = re.search(r"\b(open|go to|cd to|view)\s+([a-zA-Z0-9_\-\s\.]+)", query_lower)
-            target = open_match.group(2).strip() if open_match else ""
-            apps = ["chrome", "browser", "vscode", "vs code", "notepad", "explorer", "terminal", "youtube", "google", "calculator", "calc"]
-            matched_app = None
-            for app in apps:
-                if app in target or target in app:
-                    matched_app = app
-                    break
-            
-            if matched_app:
-                data["intent"] = "open_app"
-                data["entities"]["app_name"] = matched_app
-                data["confidence"] = 0.9
+        elif re.search(r"\b(open|go to|cd to|view|launch|start|kholo)\b", query_lower):
+            if "project" in query_lower:
+                open_match = re.search(r"\b(?:open|go to|cd to|view|launch|start|kholo)\s+(?:project\s+)?([a-zA-Z0-9_\-\s\.]+)", query_lower)
+                proj = open_match.group(1).strip() if open_match else ""
+                data["intent"] = "open_project"
+                data["entities"]["project_name"] = proj
+                data["confidence"] = 0.95
                 data["suggested_route"] = "tool"
             else:
-                data["intent"] = "open_project"
-                data["entities"]["project_name"] = target
-                data["confidence"] = 0.85
+                open_match = re.search(r"\b(?:open|launch|start|kholo)\s+(?:the\s+)?(?:app\s+|application\s+)?([a-zA-Z0-9_\-\s\.]+)", query_lower)
+                target = open_match.group(1).strip() if open_match else query_lower
+                # Strip trailing filler phrases
+                target = re.sub(r"\s+(?:in|on)\s+(?:brave|chrome|browser)$", "", target, flags=re.IGNORECASE).strip()
+                data["intent"] = "open_app"
+                data["entities"]["app_name"] = target
+                data["confidence"] = 0.95
                 data["suggested_route"] = "tool"
 
         # Match finish video / study session
@@ -1086,7 +1093,7 @@ class OllamaInterpreter(LocalInterpreter):
             headers={"Content-Type": "application/json"},
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=10.0) as response:
+        with urllib.request.urlopen(req, timeout=2.5) as response:
             if response.status == 200:
                 resp_data = json.loads(response.read().decode("utf-8"))
                 content_str = resp_data["message"]["content"]
@@ -1144,10 +1151,12 @@ class AutoInterpreter(LocalInterpreter):
         return RuleBasedInterpreter()
 
     async def interpret(self, query: str, context: dict = None) -> dict:
-        # Fast path (< 1ms): High-confidence local rules & context-first resolutions
+        # Fast path (< 1ms): Direct desktop intents & context-first resolutions
         rule_engine = RuleBasedInterpreter()
         fast_res = await rule_engine.interpret(query, context)
-        if fast_res.get("confidence", 0.0) >= 0.90:
+        if fast_res.get("confidence", 0.0) >= 0.80 or fast_res.get("intent") in (
+            "play_media", "multi_task", "take_screenshot", "show_desktop", "open_app", "control_media", "control_volume"
+        ):
             return fast_res
 
         interpreter = await self._resolve_interpreter()

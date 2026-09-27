@@ -327,15 +327,15 @@ class VoiceRecognitionWorker(QThread):
 
 class LiquidMercuryOrb(QWidget):
     """
-    Liquid Mercury Floating Orb:
-      - Photorealistic liquid metal / quicksilver shader aesthetic
-      - Surface tension ripple waves responding dynamically to voice & sound
-      - Rotating constellation orbit nodes during 'thinking' / query processing
-      - Pure standalone floating droplet with zero surrounding box/pill
+    Liquid Mercury Floating Droplet:
+      - Photorealistic liquid metal / quicksilver reflection aesthetic (matches media_1790488969282.png)
+      - Smooth harmonic surface tension ripples responding dynamically to voice & sound
+      - Rotating pearlescent constellation nodes during 'thinking' state (matches media_1790488988537.png)
+      - Pure standalone floating droplet with zero clipping and zero box clutter
     """
     clicked = pyqtSignal()
 
-    def __init__(self, parent=None, size=80):
+    def __init__(self, parent=None, size=96):
         super().__init__(parent)
         self.setFixedSize(size, size)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -344,6 +344,7 @@ class LiquidMercuryOrb(QWidget):
         self.current_state = "idle"  # idle, listening, thinking, speaking, waiting_permission
         self.is_hovered = False
         self.audio_energy = 0.0
+        self._press_pos = None
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_animation)
@@ -384,7 +385,7 @@ class LiquidMercuryOrb(QWidget):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and hasattr(self, "_press_pos"):
+        if event.button() == Qt.MouseButton.LeftButton and hasattr(self, "_press_pos") and self._press_pos:
             diff = (event.globalPosition().toPoint() - self._press_pos).manhattanLength()
             if diff < 6:
                 play_chime("confirm")
@@ -394,7 +395,7 @@ class LiquidMercuryOrb(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
+        w, h = float(self.width()), float(self.height())
         cx, cy = w / 2.0, h / 2.0
 
         is_listening = self.current_state == "listening"
@@ -402,129 +403,153 @@ class LiquidMercuryOrb(QWidget):
         is_speaking = self.current_state == "speaking"
         is_permission = self.current_state == "waiting_permission"
 
-        # Base radius
-        base_radius = (min(w, h) / 2.0) - 12.0
+        # Convex 3D droplet radii (slightly wider than tall, exactly matching media_1790488969282.png)
+        rx = 31.0
+        ry = 27.0
         if self.is_hovered:
-            base_radius += 1.5
+            rx += 1.5
+            ry += 1.2
 
-        # ── 1. Outer Platinum-Silver Luminescence / Ambient Glow ────────
-        halo_alpha = 150 if is_listening else (130 if is_thinking else (100 if is_speaking else (70 if self.is_hovered else 45)))
-        halo_r = base_radius + 11.0
-        halo_grad = QRadialGradient(cx, cy, halo_r)
+        # ── 1. Outer Luminescence / Ambient Glow ────────────────────────────
+        glow_alpha = 95 if is_listening else (75 if is_thinking else (120 if is_permission else 40))
+        glow_r = rx + 10.0
+        glow_grad = QRadialGradient(cx, cy, glow_r)
         if is_permission:
-            halo_grad.setColorAt(0.0, QColor(255, 190, 60, halo_alpha))
-            halo_grad.setColorAt(0.6, QColor(255, 100, 40, halo_alpha // 2))
+            glow_grad.setColorAt(0.0, QColor(255, 180, 50, glow_alpha))
+            glow_grad.setColorAt(0.6, QColor(255, 120, 20, glow_alpha // 2))
         elif is_listening:
-            halo_grad.setColorAt(0.0, QColor(220, 240, 255, halo_alpha))
-            halo_grad.setColorAt(0.5, QColor(160, 200, 255, halo_alpha // 2))
+            glow_grad.setColorAt(0.0, QColor(0, 210, 255, glow_alpha))
+            glow_grad.setColorAt(0.6, QColor(0, 140, 255, glow_alpha // 2))
+        elif is_thinking:
+            glow_grad.setColorAt(0.0, QColor(240, 245, 255, glow_alpha))
+            glow_grad.setColorAt(0.6, QColor(180, 200, 235, glow_alpha // 2))
         else:
-            halo_grad.setColorAt(0.0, QColor(240, 245, 255, halo_alpha))
-            halo_grad.setColorAt(0.5, QColor(180, 195, 220, halo_alpha // 2))
-        halo_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+            glow_grad.setColorAt(0.0, QColor(220, 230, 245, glow_alpha))
+            glow_grad.setColorAt(0.6, QColor(160, 180, 210, glow_alpha // 2))
+        glow_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
 
-        painter.setBrush(QBrush(halo_grad))
+        painter.setBrush(QBrush(glow_grad))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(QRectF(cx - halo_r, cy - halo_r, halo_r * 2, halo_r * 2))
+        painter.drawEllipse(QRectF(cx - glow_r, cy - glow_r, glow_r * 2, glow_r * 2))
 
-        # ── 2. Fluid Surface Wave Path (Liquid Mercury Droplet Physics) ──
-        wave_amp = 3.8 if is_listening else (2.4 if is_speaking else (1.4 if self.is_hovered else 0.8))
-        num_pts = 48
+        # ── 2. Fluid Droplet Contour Path (Harmonic Surface Wave Ripples) ──
         path = QPainterPath()
+        num_pts = 64
         first_pt = None
 
+        wave_amp = 1.3 if is_listening else (0.8 if is_speaking else 0.35)
         for k in range(num_pts):
             theta = k * (2.0 * math.pi / num_pts)
-            wave1 = math.sin(3.0 * theta + self.phase * 3.2) * wave_amp
-            wave2 = math.cos(5.0 * theta - self.phase * 2.1) * (wave_amp * 0.45)
-            r = base_radius + wave1 + wave2
-            px = cx + math.cos(theta) * r
-            py = cy + math.sin(theta) * r
+            w_offset = (
+                math.sin(2.0 * theta + self.phase * 3.0) * wave_amp +
+                math.cos(4.0 * theta - self.phase * 2.0) * (wave_amp * 0.4)
+            )
+            cur_rx = rx + w_offset
+            cur_ry = ry + w_offset * 0.85
+            px = cx + math.cos(theta) * cur_rx
+            py = cy + math.sin(theta) * cur_ry
             if k == 0:
                 path.moveTo(px, py)
                 first_pt = (px, py)
             else:
                 path.lineTo(px, py)
-
         if first_pt:
             path.lineTo(first_pt[0], first_pt[1])
         path.closeSubpath()
 
-        # ── 3. Liquid Mercury Metallic Core ──────────────────────────────
-        core_grad = QRadialGradient(cx - base_radius * 0.22, cy - base_radius * 0.25, base_radius * 1.15)
+        # ── 3. Liquid Mercury Metallic Core (Exact gradient from media_1790488969282.png) ──
+        grad = QLinearGradient(cx - rx * 0.7, cy - ry, cx + rx * 0.7, cy + ry)
         if is_permission:
-            core_grad.setColorAt(0.0, QColor(255, 245, 200, 255))
-            core_grad.setColorAt(0.25, QColor(255, 195, 70, 250))
-            core_grad.setColorAt(0.60, QColor(220, 110, 20, 245))
-            core_grad.setColorAt(0.85, QColor(100, 40, 10, 250))
-            core_grad.setColorAt(1.0, QColor(20, 10, 5, 255))
+            grad.setColorAt(0.00, QColor(28, 18, 10, 255))
+            grad.setColorAt(0.30, QColor(65, 38, 16, 255))
+            grad.setColorAt(0.44, QColor(255, 175, 45, 255))
+            grad.setColorAt(0.50, QColor(255, 245, 200, 255))
+            grad.setColorAt(0.58, QColor(245, 130, 25, 255))
+            grad.setColorAt(0.72, QColor(135, 75, 20, 255))
+            grad.setColorAt(0.88, QColor(48, 22, 8, 255))
+            grad.setColorAt(1.00, QColor(18, 8, 4, 255))
         else:
-            # Pure Liquid Mercury / Quicksilver Platinum
-            core_grad.setColorAt(0.0, QColor(255, 255, 255, 255))   # Specular highlight
-            core_grad.setColorAt(0.18, QColor(241, 245, 249, 250))  # Liquid platinum
-            core_grad.setColorAt(0.42, QColor(203, 213, 225, 245))  # Silver chrome
-            core_grad.setColorAt(0.70, QColor(100, 116, 139, 245))  # Metallic steel
-            core_grad.setColorAt(0.88, QColor(30, 41, 59, 250))     # Dark graphite refraction
-            core_grad.setColorAt(1.0, QColor(8, 12, 18, 255))       # Deep obsidian liquid edge
+            grad.setColorAt(0.00, QColor(14, 18, 26, 255))     # Deep obsidian dome at top
+            grad.setColorAt(0.30, QColor(36, 44, 58, 255))     # Dark metallic gunmetal
+            grad.setColorAt(0.42, QColor(145, 190, 230, 255))   # Electric cyan-blue horizon gleam
+            grad.setColorAt(0.50, QColor(255, 255, 255, 255))   # Liquid white-silver horizon crest
+            grad.setColorAt(0.58, QColor(238, 205, 155, 255))   # Warm champagne / amber reflection
+            grad.setColorAt(0.72, QColor(115, 122, 138, 255))   # Liquid pewter / silver body
+            grad.setColorAt(0.88, QColor(38, 46, 60, 255))     # Deep graphite shadow
+            grad.setColorAt(1.00, QColor(12, 16, 22, 255))     # Obsidian bottom edge
 
-        painter.setBrush(QBrush(core_grad))
+        painter.setBrush(QBrush(grad))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(path)
 
-        # ── 4. Liquid Chromatic Iridescence Gleam ────────────────────────
-        gleam_x = cx + math.cos(self.phase * 1.5) * (base_radius * 0.25)
-        gleam_y = cy + math.sin(self.phase * 1.5) * (base_radius * 0.20)
-        gleam_grad = QRadialGradient(gleam_x, gleam_y, base_radius * 0.70)
-        gleam_grad.setColorAt(0.0, QColor(255, 255, 255, 130))
-        gleam_grad.setColorAt(0.35, QColor(186, 230, 253, 75))   # Icy cyan sheen
-        gleam_grad.setColorAt(0.70, QColor(216, 180, 254, 50))   # Soft violet dispersion
-        gleam_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
-        painter.setBrush(QBrush(gleam_grad))
+        # ── 4. Fluid Horizon Shimmer Layer (Dynamic gleam) ─────────────────
+        shimmer_y = cy + math.sin(self.phase * 1.8) * 3.0
+        shimmer_grad = QLinearGradient(cx - rx, shimmer_y - 8, cx + rx, shimmer_y + 8)
+        shimmer_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
+        shimmer_grad.setColorAt(0.4, QColor(160, 225, 255, 55))
+        shimmer_grad.setColorAt(0.6, QColor(255, 220, 160, 45))
+        shimmer_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setBrush(QBrush(shimmer_grad))
         painter.drawPath(path)
 
-        # ── 5. Specular Liquid Highlights (Zero-G Droplet Reflections) ───
-        hi_x = cx - base_radius * 0.28
-        hi_y = cy - base_radius * 0.32
-        hi_w = base_radius * 0.70
-        hi_h = base_radius * 0.45
-        hi_grad = QLinearGradient(hi_x, hi_y - hi_h / 2, hi_x, hi_y + hi_h / 2)
-        hi_grad.setColorAt(0.0, QColor(255, 255, 255, 240))
-        hi_grad.setColorAt(0.5, QColor(255, 255, 255, 110))
+        # ── 5. Top Specular Liquid Highlight (Clear curved crescent reflection) ──
+        hi_cx = cx - rx * 0.15
+        hi_cy = cy - ry * 0.42
+        hi_w = rx * 0.85
+        hi_h = ry * 0.48
+        hi_grad = QLinearGradient(hi_cx, hi_cy - hi_h / 2, hi_cx, hi_cy + hi_h / 2)
+        hi_grad.setColorAt(0.0, QColor(255, 255, 255, 235))
+        hi_grad.setColorAt(0.55, QColor(255, 255, 255, 100))
         hi_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter.setBrush(QBrush(hi_grad))
-        painter.drawEllipse(QRectF(hi_x - hi_w / 2, hi_y - hi_h / 2, hi_w, hi_h))
+        painter.drawEllipse(QRectF(hi_cx - hi_w / 2, hi_cy - hi_h / 2, hi_w, hi_h))
 
-        # Secondary bottom bounce rim light
-        bounce_grad = QLinearGradient(cx, cy + base_radius * 0.5, cx, cy + base_radius)
+        # ── 6. Bottom Rim Bounce Light ─────────────────────────────────────
+        bounce_cy = cy + ry * 0.65
+        bounce_grad = QLinearGradient(cx, bounce_cy - 4, cx, bounce_cy + 6)
         bounce_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
-        bounce_grad.setColorAt(1.0, QColor(226, 232, 240, 110))
+        bounce_grad.setColorAt(1.0, QColor(210, 225, 240, 90))
         painter.setBrush(QBrush(bounce_grad))
-        painter.drawEllipse(QRectF(cx - base_radius * 0.6, cy + base_radius * 0.55, base_radius * 1.2, base_radius * 0.35))
+        painter.drawEllipse(QRectF(cx - rx * 0.65, bounce_cy - 4, rx * 1.3, 10))
 
-        # Precision liquid mercury edge stroke
-        edge_pen = QPen(QColor(255, 255, 255, 190), 1.2)
+        # ── 7. Perimeter Liquid Platinum Rim (Crisp bright edge as in media_1790488969282.png) ──
+        rim_pen = QPen(QColor(255, 255, 255, 215), 1.3)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(edge_pen)
+        painter.setPen(rim_pen)
         painter.drawPath(path)
 
-        # ── 6. Rotating Constellation Loading Ring (Processing / Thinking Mode) ──
-        # Exact reproduction of user reference photo media_1790488988537.png
+        # ── 8. Thinking State: Dark focus backdrop & 6 Constellation Nodes (Exact match to media_1790488988537.png) ──
         if is_thinking:
-            num_nodes = 7
-            orbit_r = base_radius + 7.5
-            for i in range(num_nodes):
-                ang = self.phase * 3.0 + (i * 2.0 * math.pi / num_nodes)
-                nx = cx + math.cos(ang) * orbit_r
-                ny = cy + math.sin(ang) * orbit_r
-                node_size = 3.6 + 1.6 * math.sin(self.phase * 4.0 + i)
+            painter.setBrush(QColor(8, 10, 16, 170))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPath(path)
 
-                node_glow = QRadialGradient(nx, ny, node_size + 3.0)
-                node_glow.setColorAt(0.0, QColor(255, 255, 255, 255))
-                node_glow.setColorAt(0.5, QColor(226, 232, 240, 190))
-                node_glow.setColorAt(1.0, QColor(255, 255, 255, 0))
+            num_beads = 6
+            orb_rx = rx * 0.58
+            orb_ry = ry * 0.58
+            rot_speed = self.phase * 3.5
 
-                painter.setBrush(QBrush(node_glow))
+            bead_radii = [5.0, 4.4, 3.8, 3.2, 2.6, 2.0]
+            bead_alphas = [255, 235, 195, 150, 100, 50]
+
+            for i in range(num_beads):
+                ang = rot_speed + (i * 2.0 * math.pi / num_beads)
+                bx = cx + math.cos(ang) * orb_rx
+                by = cy + math.sin(ang) * orb_ry
+                br = bead_radii[i]
+                ba = bead_alphas[i]
+
+                bg = QRadialGradient(bx, by, br + 2.5)
+                bg.setColorAt(0.0, QColor(255, 255, 255, ba))
+                bg.setColorAt(0.6, QColor(240, 245, 255, int(ba * 0.7)))
+                bg.setColorAt(1.0, QColor(255, 255, 255, 0))
+
+                painter.setBrush(QBrush(bg))
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(QRectF(nx - node_size - 3, ny - node_size - 3, (node_size + 3) * 2, (node_size + 3) * 2))
+                painter.drawEllipse(QRectF(bx - br - 2.5, by - br - 2.5, (br + 2.5) * 2, (br + 2.5) * 2))
+
+                painter.setBrush(QColor(255, 255, 255, ba))
+                painter.drawEllipse(QRectF(bx - br, by - br, br * 2, br * 2))
 
 
 # Backward compatibility alias
@@ -758,8 +783,8 @@ class SiriWindow(QWidget):
 
     def _init_ui(self):
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(10, 10, 10, 10)
-        self.main_layout.setSpacing(6)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
 
         # ── 1. Voice Toast Pill (Short speech preview banner) ───────────────
         self.toast_pill = QFrame(self)
@@ -995,12 +1020,12 @@ class SiriWindow(QWidget):
         self.orb_container.setObjectName("OrbContainer")
         self.orb_container.setStyleSheet("background: transparent; border: none;")
         orb_box = QVBoxLayout(self.orb_container)
-        orb_box.setContentsMargins(3, 3, 3, 3)
+        orb_box.setContentsMargins(0, 0, 0, 0)
         orb_box.setSpacing(0)
         orb_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Standalone Liquid Mercury Droplet (Click expands to Hub)
-        self.orb = LiquidMercuryOrb(self.orb_container, size=80)
+        self.orb = LiquidMercuryOrb(self.orb_container, size=96)
         self.orb.clicked.connect(self.toggle_companion_hub)
         orb_box.addWidget(self.orb)
 
@@ -1021,8 +1046,10 @@ class SiriWindow(QWidget):
         self.companion_hub.hide()
         self.toast_pill.hide()
         self.permission_card.hide()
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
         self.orb_container.show()
-        self.setFixedSize(86, 86)
+        self.setFixedSize(96, 96)
         self._center_at_bottom()
 
     def _set_capsule_mode(self):
@@ -1039,8 +1066,9 @@ class SiriWindow(QWidget):
         """Expands into full visionOS Grey-Black Glassmorphic Chat Deck."""
         self.is_expanded = True
         self.orb_container.hide()
+        self.main_layout.setContentsMargins(12, 12, 12, 12)
         self.companion_hub.show()
-        self.setFixedSize(460, 580)
+        self.setFixedSize(480, 600)
         self._center_at_bottom()
         self.hub_input.setFocus()
         self._reset_inactivity_timer()

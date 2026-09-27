@@ -419,18 +419,35 @@ class RuleBasedInterpreter(LocalInterpreter):
             data["confidence"] = 0.95
             data["suggested_route"] = "tool"
 
-        # Match open project or app
-        elif re.search(r"\b(open|go to|cd to|view|launch|start|kholo)\b", query_lower):
+        # Match open project or app (supports English 'open brave' and Hindi 'brave kholo' / 'यूट्यूब खोलो')
+        elif re.search(r"(?:\b(?:open|go to|cd to|view|launch|start|kholo|chalao)\b|(?:खोलो|चलाओ))", query_lower):
             if "project" in query_lower:
-                open_match = re.search(r"\b(?:open|go to|cd to|view|launch|start|kholo)\s+(?:project\s+)?([a-zA-Z0-9_\-\s\.]+)", query_lower)
+                open_match = re.search(r"(?:\b(?:open|go to|cd to|view|launch|start|kholo)\b|(?:खोलो))\s+(?:project\s+)?([a-zA-Z0-9_\-\s\.]+)", query_lower)
                 proj = open_match.group(1).strip() if open_match else ""
                 data["intent"] = "open_project"
                 data["entities"]["project_name"] = proj
                 data["confidence"] = 0.95
                 data["suggested_route"] = "tool"
             else:
-                open_match = re.search(r"\b(?:open|launch|start|kholo)\s+(?:the\s+)?(?:app\s+|application\s+)?([a-zA-Z0-9_\-\s\.]+)", query_lower)
+                # English order: 'open <target>'
+                open_match = re.search(r"(?:\b(?:open|launch|start|kholo)\b|(?:खोलो))\s+(?:the\s+)?(?:app\s+|application\s+)?([a-zA-Z0-9_\-\s\.\u0900-\u097F]+)", query_lower)
+                # Hindi order: '<target> kholo / खोलो'
+                if not open_match or not open_match.group(1).strip():
+                    open_match = re.search(r"([a-zA-Z0-9_\-\s\.\u0900-\u097F]+?)\s*(?:kholo|chalao|open\s+karo|खोलो|चलाओ)", query_lower)
                 target = open_match.group(1).strip() if open_match else query_lower
+                # Devanagari common transliterations
+                devanagari_map = {
+                    "यूट्यूब": "youtube",
+                    "गूगल": "google",
+                    "क्रोम": "chrome",
+                    "ब्रेव": "brave",
+                    "स्पॉटिफ़ाई": "spotify",
+                    "स्पॉटिफाई": "spotify",
+                    "नोटपैड": "notepad"
+                }
+                for hi_name, en_name in devanagari_map.items():
+                    if hi_name in target:
+                        target = target.replace(hi_name, en_name)
                 # Strip trailing filler phrases
                 target = re.sub(r"\s+(?:in|on)\s+(?:brave|chrome|browser)$", "", target, flags=re.IGNORECASE).strip()
                 data["intent"] = "open_app"

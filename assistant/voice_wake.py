@@ -14,15 +14,14 @@ from PyQt6.QtCore import QObject, pyqtSignal, QMetaObject, Qt, Q_ARG
 
 logger = logging.getLogger("kate.wake_word")
 
-# Broad wake word patterns including Indian English / Hinglish pronunciations of Kate
-# Broad wake word patterns including Indian English / Hinglish pronunciations
+# Broad wake word patterns including English, Hinglish, and Hindi (Devanagari + Romanized)
 WAKE_INVOCATION_REGEX = re.compile(
-    r"\b(?:hey\s+|hi\s+|hello\s+|ok\s+|okay\s+|listen\s+|wake\s+up\s+)?(?:kate|cate|kayt|kait|kat|ket|keth|keith|kathy|kade|packet|cricket|ticket|pocket|cake|kite|cat|jarvis)\b[,:\s]*",
+    r"\b(?:hey\s+|hi\s+|hello\s+|ok\s+|okay\s+|listen\s+|wake\s+up\s+|suno\s+|arre\s+|oye\s+|सुनो\s+|नमस्ते\s+|हे\s+)?(?:kate|cate|kayt|kait|kat|ket|keth|keith|kathy|kade|packet|cricket|ticket|pocket|cake|kite|cat|jarvis|केट|कैट|केत|जार्विस)\b[,:\s]*",
     re.IGNORECASE
 )
 
 WAKE_REGEX = re.compile(
-    r"\b(?:hey\s+|hi\s+|hello\s+|ok\s+|listen\s+|wake\s+up\s+)?(?:kate|cate|kayt|kait|kat|ket|keth|keith|kit|cat|kite|cake|kathy|kade|packet|cricket|ticket|pocket|jarvis)\b",
+    r"\b(?:hey\s+|hi\s+|hello\s+|ok\s+|listen\s+|wake\s+up\s+|suno\s+|arre\s+|oye\s+|सुनो\s+|नमस्ते\s+|हे\s+)?(?:kate|cate|kayt|kait|kat|ket|keth|keith|kit|cat|kite|cake|kathy|kade|packet|cricket|ticket|pocket|jarvis|केट|कैट|केत|जार्विस)\b",
     re.IGNORECASE
 )
 
@@ -30,62 +29,63 @@ WAKE_REGEX = re.compile(
 _CACHED_WORKING_MIC = None
 
 
-def find_working_microphone(force_refresh: bool = False) -> int:
+def find_working_microphone(force_refresh: bool = False):
     """
-    Probes available audio input devices and returns the device index
-    that has active, live energy input (bypassing dead virtual devices/Sound Mapper).
-    Caches the result so ambient wake listener and UI voice capture share the exact same device.
+    Returns the system default microphone device index (or None for system default).
+    This matches the exact microphone used by Windows Settings, Chrome, and Camera.
     """
     global _CACHED_WORKING_MIC
     if _CACHED_WORKING_MIC is not None and not force_refresh:
         return _CACHED_WORKING_MIC
 
     import speech_recognition as sr
-    import audioop
+    import pyaudio
 
-    names = sr.Microphone.list_microphone_names()
-    candidates = []
-
-    for i, name in enumerate(names):
-        lower_name = name.lower()
-        if any(w in lower_name for w in ['output', 'speaker', 'stereo mix', 'mapper']):
-            continue
-        try:
-            with sr.Microphone(device_index=i) as source:
-                energies = []
-                for _ in range(5):
-                    time.sleep(0.02)
-                    buf = source.stream.read(source.CHUNK)
-                    energies.append(audioop.rms(buf, source.SAMPLE_WIDTH))
-                avg_e = sum(energies) / len(energies)
-                if avg_e > 20:
-                    candidates.append((avg_e, i, name))
-        except Exception:
-            pass
-
-    if candidates:
-        candidates.sort(reverse=True)
-        best_idx, best_name = candidates[0][1], candidates[0][2]
-        logger.info(f"Auto-selected live microphone [Index {best_idx}]: {best_name} (RMS={candidates[0][0]:.1f})")
-        _CACHED_WORKING_MIC = best_idx
-        return best_idx
-
-    # Fallback to system default input device from PyAudio
+    # 1. First preference: System Default Input Device from PyAudio
     try:
-        import pyaudio
         p = pyaudio.PyAudio()
         default_info = p.get_default_input_device_info()
         p.terminate()
-        default_idx = default_info.get('index')
-        if default_idx is not None and default_idx < len(names):
+        default_idx = default_info.get("index")
+        name = default_info.get("name", "Default Microphone")
+        if default_idx is not None:
+            with sr.Microphone(device_index=default_idx) as source:
+                pass
+            logger.info(f"Using system default recording device [Index {default_idx}]: {name}")
             _CACHED_WORKING_MIC = int(default_idx)
             return _CACHED_WORKING_MIC
+    except Exception as e:
+        logger.warning(f"Default PyAudio device probe failed: {e}")
+
+    # 2. Second preference: System Default (None)
+    try:
+        with sr.Microphone(device_index=None) as source:
+            pass
+        logger.info("Using system default recording device (Index None)")
+        _CACHED_WORKING_MIC = None
+        return None
     except Exception:
         pass
 
-    fallback = 6 if len(names) > 6 else (1 if len(names) > 1 else 0)
-    _CACHED_WORKING_MIC = fallback
-    return fallback
+    # 3. Fallback: First openable recording device
+    try:
+        names = sr.Microphone.list_microphone_names()
+        for i, name in enumerate(names):
+            lower_name = name.lower()
+            if any(w in lower_name for w in ['output', 'speaker', 'stereo mix', 'mapper']):
+                continue
+            try:
+                with sr.Microphone(device_index=i) as source:
+                    logger.info(f"Fallback recording device [Index {i}]: {name}")
+                    _CACHED_WORKING_MIC = i
+                    return i
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    _CACHED_WORKING_MIC = None
+    return None
 
 
 class WakeWordListener(QObject):
@@ -233,22 +233,31 @@ class WakeWordListener(QObject):
         import speech_recognition as sr
 
         text = None
-        # Try Indian English first (best for Hinglish / Indian accents)
+        # 1. Try Indian English first (covers Hinglish, Indian accents, English)
         try:
-            text = recognizer.recognize_google(audio, language="en-IN").lower().strip()
+            text = recognizer.recognize_google(audio, language="en-IN").strip()
         except sr.UnknownValueError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Wake STT en-IN error: {e}")
 
-        # If not recognized, try standard en-US
+        # 2. If not recognized, try Native Hindi (hi-IN)
         if not text:
             try:
-                text = recognizer.recognize_google(audio, language="en-US").lower().strip()
+                text = recognizer.recognize_google(audio, language="hi-IN").strip()
             except sr.UnknownValueError:
                 pass
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Wake STT hi-IN error: {e}")
+
+        # 3. Fallback to US English
+        if not text:
+            try:
+                text = recognizer.recognize_google(audio, language="en-US").strip()
+            except sr.UnknownValueError:
                 pass
+            except Exception as e:
+                logger.debug(f"Wake STT en-US error: {e}")
 
         if text and not self._paused:
             logger.info(f"Kate WakeWord Heard: '{text}'")

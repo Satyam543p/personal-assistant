@@ -80,16 +80,36 @@ def play_chime(kind: str = "trigger"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class NeuralVoiceSpeaker:
-    """Asynchronous Neural TTS engine using Microsoft Aria Neural voice and Pygame mixer."""
-    NEURAL_VOICE = "en-US-AriaNeural"
-    NEURAL_RATE = "+5%"
-    NEURAL_PITCH = "+0Hz"
+    """
+    Bilingual Neural TTS engine with soft, melodious female voices:
+      - Hindi / Hinglish: Microsoft Swara (hi-IN-SwaraNeural)
+      - English: Microsoft Neerja Expressive (en-IN-NeerjaExpressiveNeural)
+    """
+    HINDI_VOICE = "hi-IN-SwaraNeural"
+    ENGLISH_VOICE = "en-IN-NeerjaExpressiveNeural"
+    NEURAL_RATE = "+0%"
+    NEURAL_PITCH = "+2Hz"
 
     def __init__(self):
         self.enabled = True
         self._sapi_voice = None
         self._edge_available = False
         self._setup()
+
+    @classmethod
+    def select_voice(cls, text: str) -> str:
+        """Dynamically chooses Swara for Hindi and Neerja for English."""
+        if re.search(r"[\u0900-\u097F]", text):
+            return cls.HINDI_VOICE
+        hindi_words = {
+            "haan", "nahi", "theek", "kaise", "kya", "karo", "karenge", "shukriya",
+            "namaste", "dhanyawad", "aap", "mera", "meri", "hum", "bhai", "kholo",
+            "chalao", "bajao", "sunao", "batao", "kaun", "kab", "kaha", "accha", "kuch"
+        }
+        tokens = set(re.findall(r"\b\w+\b", text.lower()))
+        if len(tokens.intersection(hindi_words)) >= 1:
+            return cls.HINDI_VOICE
+        return cls.ENGLISH_VOICE
 
     def _setup(self):
         try:
@@ -159,10 +179,12 @@ class NeuralVoiceSpeaker:
             import edge_tts
             import pygame
 
+            chosen_voice = self.select_voice(text)
+
             async def _gen():
                 communicate = edge_tts.Communicate(
                     text,
-                    voice=self.NEURAL_VOICE,
+                    voice=chosen_voice,
                     rate=self.NEURAL_RATE,
                     pitch=self.NEURAL_PITCH,
                 )
@@ -258,34 +280,44 @@ class VoiceRecognitionWorker(QThread):
             mic_idx = find_working_microphone()
             try:
                 with sr.Microphone(device_index=mic_idx) as source:
-                    r.adjust_for_ambient_noise(source, duration=0.5)
+                    r.adjust_for_ambient_noise(source, duration=0.2)
                     r.energy_threshold = max(300.0, r.energy_threshold)
                     audio = r.listen(source, timeout=7, phrase_time_limit=12)
             except Exception:
-                # Force refresh mic discovery if hardware state changed
                 mic_idx = find_working_microphone(force_refresh=True)
                 with sr.Microphone(device_index=mic_idx) as source:
-                    r.adjust_for_ambient_noise(source, duration=0.5)
+                    r.adjust_for_ambient_noise(source, duration=0.2)
                     r.energy_threshold = max(300.0, r.energy_threshold)
                     audio = r.listen(source, timeout=7, phrase_time_limit=12)
 
             text = None
+            # 1. Try Indian English / Hinglish
             try:
                 text = r.recognize_google(audio, language="en-IN").strip()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"UI STT en-IN error: {e}")
 
+            # 2. Try Native Hindi
+            if not text:
+                try:
+                    text = r.recognize_google(audio, language="hi-IN").strip()
+                except Exception as e:
+                    logger.debug(f"UI STT hi-IN error: {e}")
+
+            # 3. Fallback to US English
             if not text:
                 try:
                     text = r.recognize_google(audio, language="en-US").strip()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"UI STT en-US error: {e}")
 
             if text:
+                logger.info(f"UI Voice recognized: '{text}'")
                 self.speech_recognized.emit(text)
             else:
                 self.speech_failed.emit("No speech detected. Speak clearly into mic.")
         except Exception as e:
+            logger.warning(f"Voice capture worker error: {e}")
             self.speech_failed.emit(str(e))
 
 
@@ -350,50 +382,82 @@ class SiriGlowOrb(QWidget):
         w, h = self.width(), self.height()
         cx, cy = w / 2.0, h / 2.0
 
+        is_listening = self.current_state == "listening"
         is_dynamic = self.current_state in ("thinking", "active", "listening", "speaking", "waiting_permission")
-        pulse = math.sin(self.phase) * (5.0 if is_dynamic else (3.0 if self.is_hovered else 1.5))
-        radius = (min(w, h) / 2.0) - 6.0 + pulse
+        pulse = math.sin(self.phase * 2.0) * (3.0 if is_dynamic else (2.0 if self.is_hovered else 0.8))
+        radius = (min(w, h) / 2.0) - 5.0 + pulse
 
-        # Outer iridescent halo
-        glow_alpha = 140 if self.current_state == "thinking" else (110 if is_dynamic else (80 if self.is_hovered else 50))
-        glow_grad = QRadialGradient(cx, cy, radius + 10.0)
-
-        if self.current_state == "waiting_permission":
-            glow_grad.setColorAt(0.0, QColor(255, 170, 0, glow_alpha))
-            glow_grad.setColorAt(0.7, QColor(255, 80, 80, glow_alpha // 2))
-        else:
-            glow_grad.setColorAt(0.0, QColor(140, 50, 255, glow_alpha))
-            glow_grad.setColorAt(0.7, QColor(0, 210, 255, glow_alpha // 2))
-        glow_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
-
-        painter.setBrush(QBrush(glow_grad))
+        # 1. Outer Ambient Glow / Halo
+        halo_alpha = 140 if is_listening else (110 if is_dynamic else (70 if self.is_hovered else 35))
+        halo_grad = QRadialGradient(cx, cy, radius + 12.0)
+        halo_grad.setColorAt(0.0, QColor(0, 180, 255, halo_alpha))
+        halo_grad.setColorAt(0.5, QColor(140, 50, 255, halo_alpha // 2))
+        halo_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(QBrush(halo_grad))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(QRectF(cx - radius - 10, cy - radius - 10, (radius + 10) * 2, (radius + 10) * 2))
+        painter.drawEllipse(QRectF(cx - radius - 12, cy - radius - 12, (radius + 12) * 2, (radius + 12) * 2))
 
-        # Core swirling gradient
-        x_off = math.cos(self.phase) * 6.0
-        y_off = math.sin(self.phase) * 6.0
-        core_grad = QRadialGradient(cx + x_off, cy + y_off, radius)
-
-        if self.current_state == "waiting_permission":
-            core_grad.setColorAt(0.0, QColor(255, 215, 0, 220))
-            core_grad.setColorAt(0.5, QColor(255, 120, 0, 220))
-            core_grad.setColorAt(1.0, QColor(255, 45, 85, 220))
-        else:
-            core_grad.setColorAt(0.0, QColor(0, 245, 212, 200))
-            core_grad.setColorAt(0.35, QColor(0, 122, 255, 215))
-            core_grad.setColorAt(0.70, QColor(142, 68, 245, 225))
-            core_grad.setColorAt(1.0, QColor(255, 45, 85, 210))
-
-        painter.setBrush(QBrush(core_grad))
+        # 2. Base Dark Obsidian Spherical Body
+        base_grad = QRadialGradient(cx, cy, radius)
+        base_grad.setColorAt(0.0, QColor(18, 20, 28, 255))
+        base_grad.setColorAt(0.85, QColor(8, 10, 16, 255))
+        base_grad.setColorAt(1.0, QColor(2, 4, 8, 255))
+        painter.setBrush(QBrush(base_grad))
         painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
 
-        # Glass highlight
-        hi_grad = QRadialGradient(cx - radius * 0.28, cy - radius * 0.28, radius * 0.55)
-        hi_grad.setColorAt(0.0, QColor(255, 255, 255, 210))
-        hi_grad.setColorAt(0.8, QColor(255, 255, 255, 20))
-        hi_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
-        painter.setBrush(QBrush(hi_grad))
+        # 3. macOS Siri Luminous Fluid Core (Amber + Sapphire + Cyan matching user photo)
+        rot_x = math.cos(self.phase) * (radius * 0.28)
+        rot_y = math.sin(self.phase) * (radius * 0.22)
+        fluid_grad = QRadialGradient(cx + rot_x, cy + rot_y, radius * 0.95)
+
+        if self.current_state == "waiting_permission":
+            fluid_grad.setColorAt(0.0, QColor(255, 215, 0, 230))
+            fluid_grad.setColorAt(0.4, QColor(255, 120, 0, 210))
+            fluid_grad.setColorAt(0.8, QColor(220, 38, 38, 190))
+            fluid_grad.setColorAt(1.0, QColor(15, 15, 25, 230))
+        else:
+            fluid_grad.setColorAt(0.0, QColor(255, 210, 130, 240))  # Warm amber highlight
+            fluid_grad.setColorAt(0.25, QColor(0, 215, 255, 220))   # Cyan electric glow
+            fluid_grad.setColorAt(0.60, QColor(30, 80, 245, 220))   # Sapphire blue
+            fluid_grad.setColorAt(0.85, QColor(80, 30, 180, 190))   # Deep violet edge
+            fluid_grad.setColorAt(1.0, QColor(10, 12, 18, 245))    # Smoked glass shadow
+
+        painter.setBrush(QBrush(fluid_grad))
+        painter.drawEllipse(QRectF(cx - radius + 2, cy - radius + 2, (radius - 2) * 2, (radius - 2) * 2))
+
+        # 4. Constellation Mode (Animated rotating pearl nodes matching user photo)
+        if is_listening or self.current_state in ("speaking", "thinking"):
+            num_nodes = 6
+            orbit_r = radius * 0.55
+            for i in range(num_nodes):
+                ang = self.phase * 2.2 + (i * 2 * math.pi / num_nodes)
+                nx = cx + math.cos(ang) * orbit_r
+                ny = cy + math.sin(ang) * orbit_r
+                node_size = 3.2 + 1.8 * math.sin(self.phase * 3.0 + i)
+                n_glow = QRadialGradient(nx, ny, node_size + 3.0)
+                n_glow.setColorAt(0.0, QColor(255, 255, 255, 255))
+                n_glow.setColorAt(0.5, QColor(160, 240, 255, 180))
+                n_glow.setColorAt(1.0, QColor(0, 180, 255, 0))
+                painter.setBrush(QBrush(n_glow))
+                painter.drawEllipse(QRectF(nx - node_size - 3, ny - node_size - 3, (node_size + 3) * 2, (node_size + 3) * 2))
+
+        # 5. Top Specular Glass Reflection
+        spec_grad = QLinearGradient(cx, cy - radius, cx, cy + radius * 0.4)
+        spec_grad.setColorAt(0.0, QColor(255, 255, 255, 160))
+        spec_grad.setColorAt(0.3, QColor(255, 255, 255, 40))
+        spec_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setBrush(QBrush(spec_grad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QRectF(cx - radius * 0.75, cy - radius * 0.90, radius * 1.5, radius * 0.85))
+
+        # 6. Ultra-Crisp Precision Metallic Rim (Bezel)
+        rim_grad = QLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius)
+        rim_grad.setColorAt(0.0, QColor(255, 255, 255, 210))
+        rim_grad.setColorAt(0.4, QColor(120, 140, 180, 120))
+        rim_grad.setColorAt(0.8, QColor(20, 25, 35, 180))
+        rim_grad.setColorAt(1.0, QColor(200, 220, 255, 170))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QBrush(rim_grad), 1.4))
         painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
 
 
@@ -654,9 +718,9 @@ class SiriWindow(QWidget):
         self.companion_hub.setObjectName("CompanionHub")
         self.companion_hub.setStyleSheet("""
             #CompanionHub {
-                background: rgba(15, 23, 42, 0.96);
-                border: 1px solid rgba(255, 255, 255, 0.18);
-                border-radius: 24px;
+                background: rgba(9, 10, 15, 0.92);
+                border: 1px solid rgba(255, 255, 255, 0.13);
+                border-radius: 26px;
             }
         """)
         hub_layout = QVBoxLayout(self.companion_hub)
@@ -769,12 +833,12 @@ class SiriWindow(QWidget):
         self.hub_input.setPlaceholderText("Type your question, or say 'Hey Kate' to speak...")
         self.hub_input.setStyleSheet("""
             QLineEdit {
-                background: rgba(30, 41, 59, 0.8);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background: rgba(22, 24, 34, 0.75);
+                border: 1px solid rgba(255, 255, 255, 0.12);
                 border-radius: 18px; color: #F8FAFC; font-size: 13px;
                 padding: 8px 14px;
             }
-            QLineEdit:focus { border: 1px solid #38BDF8; }
+            QLineEdit:focus { border: 1px solid rgba(0, 215, 255, 0.6); background: rgba(26, 28, 40, 0.85); }
         """)
         self.hub_input.returnPressed.connect(self._on_hub_submit)
         # Mid-typing voice interruption hook
@@ -787,10 +851,10 @@ class SiriWindow(QWidget):
         self.hub_mic_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.hub_mic_btn.setStyleSheet("""
             QPushButton {
-                background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15);
+                background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 18px; font-size: 14px;
             }
-            QPushButton:hover { background: rgba(56, 189, 248, 0.25); }
+            QPushButton:hover { background: rgba(56, 189, 248, 0.25); border-color: rgba(56, 189, 248, 0.4); }
         """)
         self.hub_mic_btn.clicked.connect(self._trigger_voice_capture)
         hub_input_bar.addWidget(self.hub_mic_btn)
@@ -821,8 +885,8 @@ class SiriWindow(QWidget):
         self.voice_capsule.setObjectName("VoiceCapsule")
         self.voice_capsule.setStyleSheet("""
             #VoiceCapsule {
-                background-color: rgba(18, 20, 32, 0.92);
-                border: 1px solid rgba(255, 255, 255, 0.20);
+                background-color: rgba(10, 11, 16, 0.90);
+                border: 1px solid rgba(255, 255, 255, 0.15);
                 border-radius: 34px;
             }
         """)
@@ -1121,15 +1185,17 @@ class SiriWindow(QWidget):
         if is_user:
             bubble.setStyleSheet("""
                 #ChatBubble {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0284C7, stop:1 #2563EB);
-                    border-radius: 14px; margin-left: 50px; margin-right: 4px;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(0, 122, 255, 0.70), stop:1 rgba(90, 50, 240, 0.75));
+                    border: 1px solid rgba(255, 255, 255, 0.22);
+                    border-radius: 16px; margin-left: 50px; margin-right: 4px;
                 }
             """)
         else:
             bubble.setStyleSheet("""
                 #ChatBubble {
-                    background: rgba(30, 41, 59, 0.85); border: 1px solid rgba(255, 255, 255, 0.12);
-                    border-radius: 14px; margin-right: 50px; margin-left: 4px;
+                    background: rgba(20, 22, 32, 0.78);
+                    border: 1px solid rgba(255, 255, 255, 0.10);
+                    border-radius: 16px; margin-right: 50px; margin-left: 4px;
                 }
             """)
 

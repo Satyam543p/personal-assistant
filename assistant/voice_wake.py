@@ -25,6 +25,11 @@ WAKE_REGEX = re.compile(
     re.IGNORECASE
 )
 
+DIRECT_COMMAND_REGEX = re.compile(
+    r"^(?:open\s+|play\s+|search\s+|google\s+|launch\s+|close\s+|start\s+|show\s+|what\s+is\s+|who\s+is\s+|how\s+to\s+|tell\s+me\s+|यूट्यूब\s+|गाना\s+|खोलो|चलाओ|बजाओ|दिखाओ)",
+    re.IGNORECASE
+)
+
 
 _CACHED_WORKING_MIC = None
 
@@ -165,9 +170,9 @@ class WakeWordListener(QObject):
 
             r = sr.Recognizer()
             r.operation_timeout = 8           # Socket timeout to prevent hung recognition threads
-            r.pause_threshold = 0.5           # Snappy end-of-phrase detection
-            r.phrase_threshold = 0.2          # Catch short quick words like "Kate"
-            r.non_speaking_duration = 0.3
+            r.pause_threshold = 0.8           # Allow natural speech cadence without slicing phrases
+            r.phrase_threshold = 0.15         # Catch quick wake words
+            r.non_speaking_duration = 0.5
             r.dynamic_energy_threshold = True # Dynamically adapt to microphone volume & room acoustics
 
             mic = sr.Microphone(device_index=self._mic_index)
@@ -275,6 +280,10 @@ class WakeWordListener(QObject):
                     logger.info(f"✨ Wake word matched in '{text}'! Summoning Kate...")
                     print(f"[Kate WakeWord] ✨ Wake word matched in '{text}'! Summoning Kate...", flush=True)
                     self._trigger()
+            elif DIRECT_COMMAND_REGEX.search(text):
+                logger.info(f"✨ Direct command matched in '{text}'! Executing...")
+                print(f"[Kate WakeWord] ✨ Direct command matched in '{text}'! Executing...", flush=True)
+                self._trigger_with_command(text)
 
     def _trigger_with_command(self, cmd: str):
         """Play Siri chime and execute command on Qt main thread without asking user to repeat."""

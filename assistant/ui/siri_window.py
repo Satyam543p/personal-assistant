@@ -275,21 +275,19 @@ class VoiceRecognitionWorker(QThread):
             r = sr.Recognizer()
             r.operation_timeout = 8
             r.pause_threshold = 0.8
-            r.phrase_threshold = 0.2
+            r.phrase_threshold = 0.15
+            r.non_speaking_duration = 0.5
+            r.energy_threshold = 300.0
             r.dynamic_energy_threshold = True
 
             mic_idx = find_working_microphone()
             try:
                 with sr.Microphone(device_index=mic_idx) as source:
-                    r.adjust_for_ambient_noise(source, duration=0.2)
-                    r.energy_threshold = max(300.0, r.energy_threshold)
-                    audio = r.listen(source, timeout=7, phrase_time_limit=12)
+                    audio = r.listen(source, timeout=8, phrase_time_limit=14)
             except Exception:
                 mic_idx = find_working_microphone(force_refresh=True)
                 with sr.Microphone(device_index=mic_idx) as source:
-                    r.adjust_for_ambient_noise(source, duration=0.2)
-                    r.energy_threshold = max(300.0, r.energy_threshold)
-                    audio = r.listen(source, timeout=7, phrase_time_limit=12)
+                    audio = r.listen(source, timeout=8, phrase_time_limit=14)
 
             text = None
             # 1. Try Indian English / Hinglish
@@ -397,7 +395,7 @@ class LiquidMercuryOrb(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = float(self.width()), float(self.height())
-        cx, cy = w / 2.0, h / 2.0
+        cx, cy = w / 2.0, (h / 2.0) - 2.0  # Subtle elevation for bottom 3D shadow
 
         is_listening = self.current_state == "listening"
         is_thinking = self.current_state == "thinking"
@@ -411,29 +409,40 @@ class LiquidMercuryOrb(QWidget):
             rx += 1.5
             ry += 1.2
 
-        # ── 1. Outer Luminescence / Ambient Glow ────────────────────────────
-        glow_alpha = 95 if is_listening else (75 if is_thinking else (120 if is_permission else 40))
-        glow_r = rx + 10.0
+        # ── 1. Soft 3D Floating Cast Shadow Underneath ─────────────────────
+        shadow_y = cy + ry * 0.72
+        shadow_rect = QRectF(cx - rx * 0.85, shadow_y - 6, rx * 1.7, 14)
+        shadow_grad = QRadialGradient(cx, shadow_y, rx * 0.85)
+        shadow_grad.setColorAt(0.0, QColor(0, 0, 0, 150))
+        shadow_grad.setColorAt(0.4, QColor(0, 0, 0, 75))
+        shadow_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(QBrush(shadow_grad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(shadow_rect)
+
+        # ── 2. Subtle Outer Ambient Glow ──────────────────────────────────
+        glow_alpha = 95 if is_listening else (75 if is_thinking else (120 if is_permission else 45))
+        glow_r = rx + 11.0
         glow_grad = QRadialGradient(cx, cy, glow_r)
         if is_permission:
             glow_grad.setColorAt(0.0, QColor(255, 180, 50, glow_alpha))
             glow_grad.setColorAt(0.6, QColor(255, 120, 20, glow_alpha // 2))
         elif is_listening:
-            glow_grad.setColorAt(0.0, QColor(0, 210, 255, glow_alpha))
-            glow_grad.setColorAt(0.6, QColor(0, 140, 255, glow_alpha // 2))
+            glow_grad.setColorAt(0.0, QColor(0, 215, 255, glow_alpha))
+            glow_grad.setColorAt(0.6, QColor(0, 130, 255, glow_alpha // 2))
         elif is_thinking:
             glow_grad.setColorAt(0.0, QColor(240, 245, 255, glow_alpha))
             glow_grad.setColorAt(0.6, QColor(180, 200, 235, glow_alpha // 2))
         else:
-            glow_grad.setColorAt(0.0, QColor(220, 230, 245, glow_alpha))
-            glow_grad.setColorAt(0.6, QColor(160, 180, 210, glow_alpha // 2))
+            glow_grad.setColorAt(0.0, QColor(220, 235, 255, glow_alpha))
+            glow_grad.setColorAt(0.6, QColor(160, 185, 220, glow_alpha // 2))
         glow_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
 
         painter.setBrush(QBrush(glow_grad))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(QRectF(cx - glow_r, cy - glow_r, glow_r * 2, glow_r * 2))
 
-        # ── 2. Fluid Droplet Contour Path (Harmonic Surface Wave Ripples) ──
+        # ── 3. Fluid Droplet Contour Path (Harmonic Surface Wave Ripples) ──
         path = QPainterPath()
         num_pts = 64
         first_pt = None
@@ -458,70 +467,104 @@ class LiquidMercuryOrb(QWidget):
             path.lineTo(first_pt[0], first_pt[1])
         path.closeSubpath()
 
-        # ── 3. Liquid Mercury Metallic Core (Exact gradient from media_1790488969282.png) ──
-        grad = QLinearGradient(cx - rx * 0.7, cy - ry, cx + rx * 0.7, cy + ry)
+        # ── 4. Volumetric 3D Convex Base Gradient ─────────────────────────
+        core_grad = QRadialGradient(cx - rx * 0.22, cy - ry * 0.28, rx * 1.35)
         if is_permission:
-            grad.setColorAt(0.00, QColor(28, 18, 10, 255))
-            grad.setColorAt(0.30, QColor(65, 38, 16, 255))
-            grad.setColorAt(0.44, QColor(255, 175, 45, 255))
-            grad.setColorAt(0.50, QColor(255, 245, 200, 255))
-            grad.setColorAt(0.58, QColor(245, 130, 25, 255))
-            grad.setColorAt(0.72, QColor(135, 75, 20, 255))
-            grad.setColorAt(0.88, QColor(48, 22, 8, 255))
-            grad.setColorAt(1.00, QColor(18, 8, 4, 255))
+            core_grad.setColorAt(0.00, QColor(255, 230, 180, 255))
+            core_grad.setColorAt(0.20, QColor(220, 150, 60, 255))
+            core_grad.setColorAt(0.50, QColor(140, 70, 20, 255))
+            core_grad.setColorAt(0.85, QColor(50, 20, 8, 255))
+            core_grad.setColorAt(1.00, QColor(15, 6, 2, 255))
         else:
-            grad.setColorAt(0.00, QColor(14, 18, 26, 255))     # Deep obsidian dome at top
-            grad.setColorAt(0.30, QColor(36, 44, 58, 255))     # Dark metallic gunmetal
-            grad.setColorAt(0.42, QColor(145, 190, 230, 255))   # Electric cyan-blue horizon gleam
-            grad.setColorAt(0.50, QColor(255, 255, 255, 255))   # Liquid white-silver horizon crest
-            grad.setColorAt(0.58, QColor(238, 205, 155, 255))   # Warm champagne / amber reflection
-            grad.setColorAt(0.72, QColor(115, 122, 138, 255))   # Liquid pewter / silver body
-            grad.setColorAt(0.88, QColor(38, 46, 60, 255))     # Deep graphite shadow
-            grad.setColorAt(1.00, QColor(12, 16, 22, 255))     # Obsidian bottom edge
+            core_grad.setColorAt(0.00, QColor(240, 245, 255, 255))
+            core_grad.setColorAt(0.18, QColor(190, 205, 225, 255))
+            core_grad.setColorAt(0.40, QColor(100, 115, 138, 255))
+            core_grad.setColorAt(0.70, QColor(32, 40, 54, 255))
+            core_grad.setColorAt(0.92, QColor(14, 18, 26, 255))
+            core_grad.setColorAt(1.00, QColor(8, 10, 15, 255))
 
-        painter.setBrush(QBrush(grad))
+        painter.setBrush(QBrush(core_grad))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(path)
 
-        # ── 4. Fluid Horizon Shimmer Layer (Dynamic gleam) ─────────────────
-        shimmer_y = cy + math.sin(self.phase * 1.8) * 3.0
-        shimmer_grad = QLinearGradient(cx - rx, shimmer_y - 8, cx + rx, shimmer_y + 8)
-        shimmer_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
-        shimmer_grad.setColorAt(0.4, QColor(160, 225, 255, 55))
-        shimmer_grad.setColorAt(0.6, QColor(255, 220, 160, 45))
-        shimmer_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
-        painter.setBrush(QBrush(shimmer_grad))
-        painter.drawPath(path)
+        # ── 5. Curved 3D Liquid Horizon Reflection (Exact media_1790488969282.png) ──
+        painter.save()
+        painter.setClipPath(path)
 
-        # ── 5. Top Specular Liquid Highlight (Clear curved crescent reflection) ──
-        hi_cx = cx - rx * 0.15
-        hi_cy = cy - ry * 0.42
+        horizon_grad = QLinearGradient(cx - rx * 0.6, cy - ry * 0.9, cx + rx * 0.6, cy + ry * 0.9)
+        if is_permission:
+            horizon_grad.setColorAt(0.00, QColor(28, 18, 10, 255))
+            horizon_grad.setColorAt(0.32, QColor(65, 38, 16, 255))
+            horizon_grad.setColorAt(0.44, QColor(255, 175, 45, 255))
+            horizon_grad.setColorAt(0.50, QColor(255, 245, 200, 255))
+            horizon_grad.setColorAt(0.58, QColor(245, 130, 25, 255))
+            horizon_grad.setColorAt(0.72, QColor(135, 75, 20, 255))
+            horizon_grad.setColorAt(0.88, QColor(48, 22, 8, 255))
+            horizon_grad.setColorAt(1.00, QColor(18, 8, 4, 255))
+        else:
+            horizon_grad.setColorAt(0.00, QColor(12, 16, 24, 255))    # Obsidian top sky
+            horizon_grad.setColorAt(0.32, QColor(35, 45, 60, 255))    # Gunmetal transition
+            horizon_grad.setColorAt(0.42, QColor(135, 188, 235, 255))  # Electric cyan-blue horizon gleam
+            horizon_grad.setColorAt(0.50, QColor(255, 255, 255, 255))  # Liquid silver-white horizon crest
+            horizon_grad.setColorAt(0.58, QColor(238, 202, 148, 255))  # Warm champagne / amber sunset
+            horizon_grad.setColorAt(0.72, QColor(95, 102, 118, 255))   # Pewter body
+            horizon_grad.setColorAt(0.88, QColor(28, 35, 48, 255))    # Deep ground reflection
+            horizon_grad.setColorAt(1.00, QColor(10, 14, 20, 255))    # Obsidian base
+
+        painter.setBrush(QBrush(horizon_grad))
+        painter.drawRect(QRectF(cx - rx - 5, cy - ry - 5, (rx + 5) * 2, (ry + 5) * 2))
+
+        # ── 6. 3D Fresnel Edge Rim Lighting (Volumetric Sphere Depth) ──────
+        fresnel_grad = QRadialGradient(cx, cy, rx)
+        fresnel_grad.setColorAt(0.00, QColor(255, 255, 255, 0))
+        fresnel_grad.setColorAt(0.72, QColor(255, 255, 255, 0))
+        fresnel_grad.setColorAt(0.88, QColor(200, 225, 255, 60))
+        fresnel_grad.setColorAt(0.97, QColor(240, 248, 255, 175))
+        fresnel_grad.setColorAt(1.00, QColor(255, 255, 255, 230))
+        painter.setBrush(QBrush(fresnel_grad))
+        painter.drawRect(QRectF(cx - rx - 5, cy - ry - 5, (rx + 5) * 2, (ry + 5) * 2))
+
+        # ── 7. Top 3D Specular Liquid Gloss Dome ──────────────────────────
+        hi_cx = cx - rx * 0.18
+        hi_cy = cy - ry * 0.38
         hi_w = rx * 0.85
-        hi_h = ry * 0.48
+        hi_h = ry * 0.46
         hi_grad = QLinearGradient(hi_cx, hi_cy - hi_h / 2, hi_cx, hi_cy + hi_h / 2)
-        hi_grad.setColorAt(0.0, QColor(255, 255, 255, 235))
-        hi_grad.setColorAt(0.55, QColor(255, 255, 255, 100))
+        hi_grad.setColorAt(0.0, QColor(255, 255, 255, 240))
+        hi_grad.setColorAt(0.5, QColor(255, 255, 255, 105))
         hi_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter.setBrush(QBrush(hi_grad))
         painter.drawEllipse(QRectF(hi_cx - hi_w / 2, hi_cy - hi_h / 2, hi_w, hi_h))
 
-        # ── 6. Bottom Rim Bounce Light ─────────────────────────────────────
-        bounce_cy = cy + ry * 0.65
+        # Sharp 3D Pinpoint Hotspot
+        hotspot_x = cx - rx * 0.22
+        hotspot_y = cy - ry * 0.38
+        hotspot_grad = QRadialGradient(hotspot_x, hotspot_y, 4.0)
+        hotspot_grad.setColorAt(0.0, QColor(255, 255, 255, 255))
+        hotspot_grad.setColorAt(0.6, QColor(255, 255, 255, 180))
+        hotspot_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setBrush(QBrush(hotspot_grad))
+        painter.drawEllipse(QRectF(hotspot_x - 4, hotspot_y - 4, 8, 8))
+
+        # ── 8. Bottom Rim Bounce Light (Reflected Ambient from Floor) ─────
+        bounce_cy = cy + ry * 0.68
         bounce_grad = QLinearGradient(cx, bounce_cy - 4, cx, bounce_cy + 6)
         bounce_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
-        bounce_grad.setColorAt(1.0, QColor(210, 225, 240, 90))
+        bounce_grad.setColorAt(1.0, QColor(215, 230, 248, 95))
         painter.setBrush(QBrush(bounce_grad))
-        painter.drawEllipse(QRectF(cx - rx * 0.65, bounce_cy - 4, rx * 1.3, 10))
+        painter.drawEllipse(QRectF(cx - rx * 0.62, bounce_cy - 4, rx * 1.24, 10))
 
-        # ── 7. Perimeter Liquid Platinum Rim (Crisp bright edge as in media_1790488969282.png) ──
-        rim_pen = QPen(QColor(255, 255, 255, 215), 1.3)
+        painter.restore()
+
+        # ── 9. Perimeter Liquid Platinum Rim (Crisp bright edge) ──────────
+        rim_pen = QPen(QColor(255, 255, 255, 220), 1.25)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(rim_pen)
         painter.drawPath(path)
 
-        # ── 8. Thinking State: Dark focus backdrop & 6 Constellation Nodes (Exact match to media_1790488988537.png) ──
+        # ── 10. Thinking State: Dark focus backdrop & 6 Constellation Nodes (media_1790488988537.png) ──
         if is_thinking:
-            painter.setBrush(QColor(8, 10, 16, 170))
+            painter.setBrush(QColor(8, 10, 16, 175))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPath(path)
 
@@ -753,7 +796,7 @@ class SiriWindow(QWidget):
 
         self.speaker = NeuralVoiceSpeaker()
         self.wake_listener = None
-        self.is_pinned = False
+        self.is_pinned = True
         self.is_expanded = False
         self._voice_worker = None
         self._active_worker = None
@@ -1244,15 +1287,22 @@ class SiriWindow(QWidget):
         if self.speaker.enabled:
             self.speaker.speak(
                 resp_msg,
-                on_done_callback=lambda: (
-                    self.orb.set_state("idle"),
-                    self.status_label.setText("Ready"),
-                    self._on_response_complete()
+                on_done_callback=lambda: QMetaObject.invokeMethod(
+                    self,
+                    "_on_speech_done_safe",
+                    Qt.ConnectionType.QueuedConnection
                 )
             )
         else:
             self.orb.set_state("idle")
             self._on_response_complete()
+
+    @pyqtSlot()
+    def _on_speech_done_safe(self):
+        """Thread-safe UI handler invoked when voice speaking terminates."""
+        self.orb.set_state("idle")
+        self.status_label.setText("Ready")
+        self._on_response_complete()
 
     def _on_response_complete(self):
         if self.wake_listener:

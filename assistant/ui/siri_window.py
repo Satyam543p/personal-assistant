@@ -20,7 +20,7 @@ import threading
 import tempfile
 import subprocess
 from PyQt6.QtCore import (
-    Qt, QTimer, QUrl, QRectF, pyqtSignal, pyqtSlot, QThread, QPoint
+    Qt, QTimer, QUrl, QRectF, pyqtSignal, pyqtSlot, QThread, QPoint, QMetaObject
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QRadialGradient, QLinearGradient, QPen, QBrush,
@@ -194,27 +194,42 @@ class NeuralVoiceSpeaker:
                 await communicate.save(tmp.name)
                 return tmp.name
 
-            loop = asyncio.new_event_loop()
-            mp3_path = loop.run_until_complete(_gen())
-            loop.close()
-
-            if not pygame.mixer.get_init():
-                pygame.mixer.init()
-            pygame.mixer.music.load(mp3_path)
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy():
-                time.sleep(0.05)
+            try:
+                loop = asyncio.new_event_loop()
+                mp3_path = loop.run_until_complete(_gen())
+                loop.close()
+            except Exception as e:
+                logger.warning(f"Edge TTS synthesis error: {e}, falling back to SAPI.")
+                self._speak_sapi(text, on_done_callback)
+                return
 
             try:
-                os.remove(mp3_path)
-            except Exception:
-                pass
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+                pygame.mixer.music.load(mp3_path)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    time.sleep(0.05)
+            except Exception as e:
+                logger.warning(f"Pygame playback error: {e}")
+            finally:
+                try:
+                    os.remove(mp3_path)
+                except Exception:
+                    pass
 
             if on_done_callback:
-                on_done_callback()
+                try:
+                    on_done_callback()
+                except Exception as e:
+                    logger.error(f"Error in on_done_callback: {e}")
         except Exception as e:
-            logger.warning(f"Edge TTS / pygame playback error: {e}, using SAPI.")
-            self._speak_sapi(text, on_done_callback)
+            logger.warning(f"Voice speaker top-level error: {e}")
+            if on_done_callback:
+                try:
+                    on_done_callback()
+                except Exception:
+                    pass
 
     def _speak_sapi(self, text, on_done_callback):
         if self._sapi_voice:

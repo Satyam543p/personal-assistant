@@ -100,6 +100,18 @@ class AppRegistry:
         app_name_clean = app_name.strip()
         name_lower = app_name_clean.lower()
 
+        # 0. Check known web applications first (e.g. YouTube, Spotify, ChatGPT, WhatsApp)
+        if name_lower in WEB_APP_FALLBACKS:
+            target_url = WEB_APP_FALLBACKS[name_lower]
+            display = app_name_clean.title()
+            self._open_url(target_url, browser or "brave")
+            return {
+                "status": "success",
+                "mode": "url",
+                "message": f"Opening {display} in Brave, Satyam.",
+                "target": target_url
+            }
+
         # 1. Try apps.json
         entry = self.find_app(name_lower)
         if entry:
@@ -108,7 +120,7 @@ class AppRegistry:
 
             # If AppID is a web URL
             if appid.startswith("http://") or appid.startswith("https://"):
-                self._open_url(appid, browser)
+                self._open_url(appid, browser or "brave")
                 return {
                     "status": "success",
                     "mode": "url",

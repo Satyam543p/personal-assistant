@@ -11,6 +11,7 @@ import logging
 import subprocess
 import shutil
 import webbrowser
+import re
 
 logger = logging.getLogger("kate.apps")
 
@@ -39,6 +40,17 @@ WEB_APP_FALLBACKS = {
     "gmail": "https://mail.google.com",
     "maps": "https://maps.google.com",
     "linkedin": "https://www.linkedin.com"
+}
+
+KNOWN_APP_ALIASES = {
+    "vs code": ["visual studio code", "code"],
+    "vscode": ["visual studio code", "code"],
+    "code": ["visual studio code", "vs code"],
+    "yt": ["youtube"],
+    "browser": ["brave", "chrome", "edge"],
+    "calc": ["calculator"],
+    "cmd": ["command prompt", "terminal"],
+    "terminal": ["powershell", "cmd", "windows terminal"]
 }
 
 
@@ -74,6 +86,38 @@ class AppRegistry:
         except Exception as e:
             logger.error(f"Failed to load apps.json: {e}")
 
+    def find_installed_shortcut(self, name: str) -> tuple[str | None, str | None]:
+        """Scans Desktop and Start Menu for real .lnk application shortcuts."""
+        clean = re.sub(r'[^a-zA-Z0-9]', '', name).lower()
+        targets = [clean]
+        for k, aliases in KNOWN_APP_ALIASES.items():
+            if clean == re.sub(r'[^a-zA-Z0-9]', '', k).lower():
+                targets.extend([re.sub(r'[^a-zA-Z0-9]', '', a).lower() for a in aliases])
+
+        search_dirs = [
+            os.path.expanduser('~/Desktop'),
+            os.path.expandvars(r'%APPDATA%\Microsoft\Windows\Start Menu\Programs\Chrome Apps'),
+            os.path.expandvars(r'%APPDATA%\Microsoft\Windows\Start Menu\Programs'),
+            os.path.expandvars(r'%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs')
+        ]
+        for d in search_dirs:
+            if not os.path.exists(d):
+                continue
+            try:
+                entries = os.listdir(d)
+            except Exception:
+                continue
+            for f in entries:
+                full_p = os.path.join(d, f)
+                if os.path.isfile(full_p) and f.lower().endswith('.lnk'):
+                    base = os.path.splitext(f)[0]
+                    base_clean = re.sub(r'\s*-\s*copy.*$', '', base, flags=re.IGNORECASE).strip()
+                    norm = re.sub(r'[^a-zA-Z0-9]', '', base_clean).lower()
+                    for t in targets:
+                        if t == norm or t in norm or norm in t:
+                            return full_p, base_clean
+        return None, None
+
     def find_app(self, app_name: str) -> dict | None:
         """Finds app entry by exact or fuzzy substring match."""
         name_clean = app_name.strip().lower()
@@ -93,26 +137,70 @@ class AppRegistry:
         """
         Launches an application by name.
         Sequence:
-          1. Check apps.json -> shell:AppsFolder / exe / URL.
-          2. Check system PATH or common paths.
-          3. Fallback: Open web app in browser.
+          1. Check physical Desktop & Start Menu shortcuts (.lnk) -> launch via os.startfile.
+          2. Check known executable paths (VS Code, Brave, Chrome, etc.).
+          3. Check apps.json -> shell:AppsFolder / exe / URL.
+          4. Check system PATH.
+          5. Fallback: Open web app in browser.
         """
+        import re
         app_name_clean = app_name.strip()
         name_lower = app_name_clean.lower()
 
-        # 0. Check known web applications first (e.g. YouTube, Spotify, ChatGPT, WhatsApp)
-        if name_lower in WEB_APP_FALLBACKS:
-            target_url = WEB_APP_FALLBACKS[name_lower]
-            display = app_name_clean.title()
-            self._open_url(target_url, browser or "brave")
-            return {
-                "status": "success",
-                "mode": "url",
-                "message": f"Opening {display} in Brave, Satyam.",
-                "target": target_url
-            }
+        # 1. First priority: Check physical Desktop & Start Menu shortcuts (.lnk)
+        lnk_path, display = self.find_installed_shortcut(name_lower)
+        if lnk_path and os.path.exists(lnk_path):
+            try:
+                os.startfile(lnk_path)
+                return {
+                    "status": "success",
+                    "mode": "shortcut",
+                    "message": f"Opening {display}, Satyam.",
+                    "target": lnk_path
+                }
+            except Exception as e:
+                logger.warning(f"Failed to startfile shortcut {lnk_path}: {e}")
 
-        # 1. Try apps.json
+        # 2. Second priority: Known local executable paths
+        known_executables = {
+            "vs code": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+            "vscode": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+            "code": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+            "visual studio code": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+            "brave": os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+            "chrome": os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            "google chrome": os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            "notepad": "notepad.exe",
+            "calculator": "calc.exe",
+            "calc": "calc.exe",
+            "paint": "mspaint.exe"
+        }
+        for alias, exe in known_executables.items():
+            if name_lower == alias:
+                if os.path.isabs(exe) and os.path.exists(exe):
+                    try:
+                        os.startfile(exe)
+                        return {
+                            "status": "success",
+                            "mode": "executable",
+                            "message": f"Opening {app_name_clean.title()}, Satyam.",
+                            "target": exe
+                        }
+                    except Exception as e:
+                        logger.warning(f"os.startfile failed for {exe}: {e}")
+                elif not os.path.isabs(exe):
+                    try:
+                        os.startfile(exe)
+                        return {
+                            "status": "success",
+                            "mode": "executable",
+                            "message": f"Opening {app_name_clean.title()}, Satyam.",
+                            "target": exe
+                        }
+                    except Exception as e:
+                        logger.warning(f"os.startfile failed for {exe}: {e}")
+
+        # 3. Try apps.json
         entry = self.find_app(name_lower)
         if entry:
             appid = entry["appid"]
@@ -120,7 +208,7 @@ class AppRegistry:
 
             # If AppID is a web URL
             if appid.startswith("http://") or appid.startswith("https://"):
-                self._open_url(appid, browser or "brave")
+                self._open_url(appid, browser)
                 return {
                     "status": "success",
                     "mode": "url",
@@ -131,11 +219,11 @@ class AppRegistry:
             # If AppID is an explicit .exe file path on disk
             if os.path.isabs(appid) and os.path.exists(appid):
                 try:
-                    subprocess.Popen([appid], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+                    os.startfile(appid)
                     return {
                         "status": "success",
                         "mode": "exe",
-                        "message": f"Launching {display_name}, Satyam.",
+                        "message": f"Opening {display_name}, Satyam.",
                         "target": appid
                     }
                 except Exception as e:
@@ -148,27 +236,27 @@ class AppRegistry:
                 return {
                     "status": "success",
                     "mode": "shell_apps_folder",
-                    "message": f"Launching {display_name}, Satyam.",
+                    "message": f"Opening {display_name}, Satyam.",
                     "target": appid
                 }
             except Exception as e:
                 logger.error(f"Failed to launch via shell:AppsFolder: {e}")
 
-        # 2. Try standard system executable
+        # 4. Try standard system executable via PATH
         exe_path = shutil.which(name_lower) or shutil.which(f"{name_lower}.exe")
         if exe_path:
             try:
-                subprocess.Popen([exe_path], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+                os.startfile(exe_path)
                 return {
                     "status": "success",
                     "mode": "system_path",
-                    "message": f"Launching {app_name_clean}, Satyam.",
+                    "message": f"Opening {app_name_clean.title()}, Satyam.",
                     "target": exe_path
                 }
             except Exception as e:
                 logger.warning(f"PATH execution failed for {exe_path}: {e}")
 
-        # 3. Graceful Fallback: Open Web Application in Browser
+        # 5. Graceful Fallback: Open Web Application in Browser
         web_url = WEB_APP_FALLBACKS.get(name_lower)
         if not web_url:
             web_url = f"https://www.google.com/search?q={app_name_clean}+web+app"
@@ -177,21 +265,21 @@ class AppRegistry:
         return {
             "status": "success",
             "mode": "web_fallback",
-            "message": f"I couldn't find the desktop app for {app_name_clean}, so I've opened its web version in your browser, Satyam.",
+            "message": f"Opening {app_name_clean.title()} in your browser, Satyam.",
             "target": web_url
         }
 
     def _open_url(self, url: str, browser: str = None):
-        """Opens URL in specified browser (e.g. Brave) or system default."""
-        if browser:
-            b_lower = browser.lower()
-            brave_path = os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe")
-            if "brave" in b_lower and os.path.exists(brave_path):
-                subprocess.Popen([brave_path, url])
+        """Opens URL in specified browser or system default."""
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(url)
                 return
-
+        except Exception:
+            pass
         webbrowser.open(url)
 
 
 # Global singleton instance
 app_registry = AppRegistry()
+

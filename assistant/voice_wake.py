@@ -118,6 +118,7 @@ class WakeWordListener(QObject):
     def pause(self):
         """Temporarily suspend wake-word processing and cleanly release the PyAudio microphone stream."""
         self._paused = True
+        self._is_recognizing = False
         if self._stop_listening_fn:
             try:
                 self._stop_listening_fn(wait_for_stop=False)
@@ -127,8 +128,11 @@ class WakeWordListener(QObject):
         logger.info("WakeWordListener: Mic hardware released (paused).")
 
     def resume(self):
-        """Resume ambient wake-word listening."""
+        """Resume ambient wake-word listening with freshly calibrated sensitivity."""
         self._paused = False
+        self._is_recognizing = False
+        if hasattr(self, "_recognizer") and self._recognizer:
+            self._recognizer.energy_threshold = 280.0
         if self._running and self._stop_listening_fn is None:
             self._start_listening_stream()
         logger.info("WakeWordListener: Ambient listener resumed.")
@@ -144,6 +148,7 @@ class WakeWordListener(QObject):
 
     def stop(self):
         self._running = False
+        self._is_recognizing = False
         if self._stop_listening_fn:
             try:
                 self._stop_listening_fn(wait_for_stop=True)
@@ -169,16 +174,18 @@ class WakeWordListener(QObject):
             print(f"[Kate WakeWord] Binding to microphone device index: {self._mic_index}")
 
             r = sr.Recognizer()
-            r.operation_timeout = 8           # Socket timeout to prevent hung recognition threads
-            r.pause_threshold = 0.8           # Allow natural speech cadence without slicing phrases
-            r.phrase_threshold = 0.15         # Catch quick wake words
-            r.non_speaking_duration = 0.5
-            r.dynamic_energy_threshold = True # Dynamically adapt to microphone volume & room acoustics
+            r.operation_timeout = 4           # Short socket timeout to keep ambient loop responsive
+            r.pause_threshold = 0.6           # Catch quick wake words without waiting
+            r.phrase_threshold = 0.15
+            r.non_speaking_duration = 0.4
+            r.dynamic_energy_threshold = False # Keep fixed threshold to prevent mic going deaf after audio
+            r.energy_threshold = 280.0
 
             mic = sr.Microphone(device_index=self._mic_index)
             with mic as source:
-                r.adjust_for_ambient_noise(source, duration=0.8)
-                r.energy_threshold = max(300.0, r.energy_threshold)
+                r.adjust_for_ambient_noise(source, duration=0.5)
+                # Keep sensitivity high & responsive (clamp between 220 and 380)
+                r.energy_threshold = max(220.0, min(380.0, r.energy_threshold))
                 logger.info(f"Calibrated mic energy threshold: {r.energy_threshold:.1f}")
                 print(f"[Kate WakeWord] Calibrated mic energy threshold: {r.energy_threshold:.1f}", flush=True)
 
@@ -218,7 +225,7 @@ class WakeWordListener(QObject):
                 self._stop_listening_fn = None
             try:
                 self._stop_listening_fn = self._recognizer.listen_in_background(
-                    self._mic_source, self._audio_callback, phrase_time_limit=5
+                    self._mic_source, self._audio_callback, phrase_time_limit=4
                 )
             except Exception as e:
                 logger.debug(f"Restarting listening stream error: {e}")
@@ -247,7 +254,7 @@ class WakeWordListener(QObject):
             logger.debug(f"Wake STT en-IN error: {e}")
 
         # 2. If not recognized, try Native Hindi (hi-IN)
-        if not text:
+        if not text and not self._paused:
             try:
                 text = recognizer.recognize_google(audio, language="hi-IN").strip()
             except sr.UnknownValueError:

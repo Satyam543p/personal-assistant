@@ -284,25 +284,30 @@ class VoiceRecognitionWorker(QThread):
     speech_recognized = pyqtSignal(str)
     speech_failed = pyqtSignal(str)
 
+    def __init__(self, timeout: int = 7, phrase_time_limit: int = 12):
+        super().__init__()
+        self.timeout = timeout
+        self.phrase_time_limit = phrase_time_limit
+
     def run(self):
         try:
             import speech_recognition as sr
             r = sr.Recognizer()
-            r.operation_timeout = 8
-            r.pause_threshold = 0.8
+            r.operation_timeout = 5
+            r.pause_threshold = 0.7
             r.phrase_threshold = 0.15
-            r.non_speaking_duration = 0.5
-            r.energy_threshold = 300.0
-            r.dynamic_energy_threshold = True
+            r.non_speaking_duration = 0.4
+            r.dynamic_energy_threshold = False  # Fixed threshold to prevent mic going deaf after audio
+            r.energy_threshold = 280.0
 
             mic_idx = find_working_microphone()
             try:
                 with sr.Microphone(device_index=mic_idx) as source:
-                    audio = r.listen(source, timeout=8, phrase_time_limit=14)
+                    audio = r.listen(source, timeout=self.timeout, phrase_time_limit=self.phrase_time_limit)
             except Exception:
                 mic_idx = find_working_microphone(force_refresh=True)
                 with sr.Microphone(device_index=mic_idx) as source:
-                    audio = r.listen(source, timeout=8, phrase_time_limit=14)
+                    audio = r.listen(source, timeout=self.timeout, phrase_time_limit=self.phrase_time_limit)
 
             text = None
             # 1. Try Indian English / Hinglish
@@ -813,6 +818,7 @@ class SiriWindow(QWidget):
         self.wake_listener = None
         self.is_pinned = True
         self.is_expanded = False
+        self.continuous_talk_enabled = True
         self._voice_worker = None
         self._active_worker = None
         self._chat_history_list = []
@@ -1315,6 +1321,64 @@ class SiriWindow(QWidget):
     @pyqtSlot()
     def _on_speech_done_safe(self):
         """Thread-safe UI handler invoked when voice speaking terminates."""
+        if getattr(self, "continuous_talk_enabled", True):
+            self.orb.set_state("listening")
+            self.status_label.setText("Listening... speak now")
+            self._trigger_continuous_voice_capture()
+        else:
+            self.orb.set_state("idle")
+            self.status_label.setText("Ready")
+            self._on_response_complete()
+
+    def _trigger_continuous_voice_capture(self):
+        """Listens for follow-up voice input in continuous conversation mode."""
+        if hasattr(self, "_voice_worker") and self._voice_worker and self._voice_worker.isRunning():
+            return
+        if self.wake_listener:
+            self.wake_listener.pause()
+        self._voice_worker = VoiceRecognitionWorker(timeout=6, phrase_time_limit=10)
+        self._voice_worker.speech_recognized.connect(self._on_continuous_voice_recognized)
+        self._voice_worker.speech_failed.connect(self._on_continuous_voice_failed)
+        self._voice_worker.start()
+
+    def _on_continuous_voice_recognized(self, text: str):
+        dismiss_words = {
+            "bye", "goodbye", "good bye", "exit", "quit", "stop", "cancel",
+            "thank you", "thanks", "alvida", "bas", "kuch nahi", "nothing",
+            "band karo", "so jao", "sleep", "dismiss", "chup", "shut up"
+        }
+        clean = text.lower().strip()
+        if clean in dismiss_words or any(clean.startswith(w) for w in ["bye", "goodbye", "alvida", "bas", "nothing", "thank you", "thanks"]):
+            self.orb.set_state("idle")
+            self.status_label.setText("Ready")
+            self._add_chat_bubble(text, is_user=True)
+            self._add_chat_bubble("Goodbye, Satyam!", is_user=False, badge="⚡ Kate")
+            if self.speaker.enabled:
+                self.speaker.speak(
+                    "Goodbye, Satyam!",
+                    on_done_callback=lambda: QMetaObject.invokeMethod(
+                        self,
+                        "_on_speech_done_final",
+                        Qt.ConnectionType.QueuedConnection
+                    )
+                )
+            else:
+                self._on_response_complete()
+            return
+
+        play_chime("success")
+        self.orb.set_state("thinking")
+        self.status_label.setText("Thinking...")
+        self._execute_query(text)
+
+    @pyqtSlot()
+    def _on_speech_done_final(self):
+        self.orb.set_state("idle")
+        self.status_label.setText("Ready")
+        self._on_response_complete()
+
+    def _on_continuous_voice_failed(self, err_msg: str):
+        # User finished speaking or timeout elapsed -> return to idle and resume wake listener
         self.orb.set_state("idle")
         self.status_label.setText("Ready")
         self._on_response_complete()

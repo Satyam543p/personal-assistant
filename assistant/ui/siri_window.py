@@ -819,6 +819,8 @@ class SiriWindow(QWidget):
         self.is_pinned = True
         self.is_expanded = False
         self.continuous_talk_enabled = True
+        self.session_active = False
+        self.silence_count = 0
         self._voice_worker = None
         self._active_worker = None
         self._chat_history_list = []
@@ -1056,7 +1058,7 @@ class SiriWindow(QWidget):
             }
             QPushButton:hover { background: rgba(56, 189, 248, 0.25); border-color: rgba(56, 189, 248, 0.4); }
         """)
-        self.hub_mic_btn.clicked.connect(self._trigger_voice_capture)
+        self.hub_mic_btn.clicked.connect(self.start_conversation_session)
         hub_input_bar.addWidget(self.hub_mic_btn)
 
         # Hub Send Button
@@ -1149,7 +1151,62 @@ class SiriWindow(QWidget):
     @pyqtSlot()
     def summon(self, start_voice: bool = True):
         """Hands-free summon via 'Hey Kate' or hotkey."""
-        self._set_capsule_mode()
+        if start_voice:
+            self.start_conversation_session()
+        else:
+            self.session_active = False
+            self._set_capsule_mode()
+            self.show()
+            self.orb.set_state("idle")
+            self.status_label.setText("Ready")
+            if self.wake_listener:
+                self.wake_listener.resume()
+
+    @pyqtSlot(str)
+    def summon_with_command(self, query: str):
+        """Invoked when user speaks wake word and command in one breath ('Hey Kate <command>')."""
+        self.start_conversation_session(initial_command=query)
+
+    @pyqtSlot()
+    def summon_voice(self):
+        """Invoked when ambient wake-word 'Hey Kate' is detected."""
+        self.start_conversation_session()
+
+    @pyqtSlot()
+    def toggle_visibility(self):
+        """Toggles active conversation session on Ctrl+Space / Alt+Space."""
+        now = time.time()
+        if hasattr(self, "_last_toggle") and (now - self._last_toggle) < 0.4:
+            return
+        self._last_toggle = now
+
+        if self.session_active:
+            # Active conversation running -> Dismiss / stop on Ctrl+Space!
+            self.end_conversation_session(speak_goodbye=False)
+        else:
+            # Wake up Kate and start continuous conversation!
+            self.start_conversation_session()
+
+    # ── Continuous Conversation Session Engine ─────────────────────────────
+
+    def _trigger_voice_capture(self):
+        """Starts live microphone listening / conversation session."""
+        self.start_conversation_session()
+
+    def start_conversation_session(self, initial_command: str = None):
+        """
+        Starts an uninterrupted continuous conversation session with Kate.
+        Kate stays in an active listening & task-execution loop indefinitely
+        until the user says 'go kate', 'bye kate', or presses Ctrl+Space.
+        """
+        self.session_active = True
+        self.silence_count = 0
+
+        if self.is_expanded:
+            self._set_orb_mode()
+        else:
+            self._set_capsule_mode()
+
         self.show()
         self.raise_()
         self.activateWindow()
@@ -1168,94 +1225,107 @@ class SiriWindow(QWidget):
         except Exception:
             pass
 
-        self._reset_inactivity_timer()
-        if start_voice:
-            self._trigger_voice_capture()
-        else:
-            self.orb.set_state("idle")
-            self.status_label.setText("Ready")
-
-    @pyqtSlot(str)
-    def summon_with_command(self, query: str):
-        """Invoked when user speaks wake word and command in one breath ('Hey Kate <command>')."""
-        if self.is_expanded:
-            self.hub_input.clear()
-            self._set_orb_mode()
-        else:
-            self._set_orb_mode()
-
-        self.show()
-        self.raise_()
-        self.activateWindow()
-        self._reset_inactivity_timer()
         if self.wake_listener:
             self.wake_listener.pause()
-        play_chime("success")
-        self._execute_query(query)
 
-    @pyqtSlot()
-    def summon_voice(self):
-        """Invoked when ambient wake-word 'Hey Kate' is detected."""
-        if self.is_expanded:
-            self.hub_input.clear()
-            self._set_orb_mode()
-        self.summon(start_voice=True)
+        self._reset_inactivity_timer()
 
-    @pyqtSlot()
-    def toggle_visibility(self):
-        now = time.time()
-        if hasattr(self, "_last_toggle") and (now - self._last_toggle) < 0.4:
-            return
-        self._last_toggle = now
-
-        if self.isVisible():
-            self._inactivity_timer.stop()
-            self._sleep_grace_timer.stop()
-            self.speaker.stop()
-            self.hide()
-            if self.wake_listener:
-                self.wake_listener.resume()
-            self.dismissed.emit()
+        if initial_command:
+            play_chime("success")
+            self._execute_query(initial_command)
         else:
-            self.summon(start_voice=True)
+            play_chime("trigger")
+            self._start_session_voice_capture()
 
-    def _trigger_voice_capture(self):
-        """Starts live microphone listening with liquid ripple animation."""
+    def _start_session_voice_capture(self):
+        """Starts live microphone listening for the ongoing conversation session."""
+        if not self.session_active:
+            return
         if hasattr(self, "_voice_worker") and self._voice_worker and self._voice_worker.isRunning():
-            logger.info("Voice recognition worker already active, ignoring re-entrant trigger.")
             return
-
         if self.wake_listener:
             self.wake_listener.pause()
 
-        play_chime("trigger")
         self.orb.set_state("listening")
-        self.status_label.setText("Listening... speak now")
+        self.status_label.setText("Listening... (say 'go kate' to stop)")
         self.toast_pill.hide()
 
-        self._voice_worker = VoiceRecognitionWorker()
-        self._voice_worker.speech_recognized.connect(self._on_voice_recognized)
-        self._voice_worker.speech_failed.connect(self._on_voice_failed)
+        self._voice_worker = VoiceRecognitionWorker(timeout=7, phrase_time_limit=14)
+        self._voice_worker.speech_recognized.connect(self._on_session_speech_recognized)
+        self._voice_worker.speech_failed.connect(self._on_session_speech_failed)
         self._voice_worker.start()
 
-    def _on_voice_recognized(self, text: str):
-        play_chime("success")
-        self.orb.set_state("thinking")
-        self.status_label.setText("Thinking...")
+    def _on_session_speech_recognized(self, text: str):
+        """Handles user voice input during continuous conversation session."""
+        if not self.session_active:
+            return
+        self.silence_count = 0
 
-        # Check if this voice input was an answer to a pending permission modal!
+        # Check if voice input answers a pending confirmation modal
         if self.permission_card.isVisible():
             handled = self.permission_card.handle_voice_answer(text)
             if handled:
-                if self.wake_listener:
-                    self.wake_listener.resume()
-                self._reset_inactivity_timer()
+                self._start_session_voice_capture()
                 return
 
-        # Execute query
+        # Check for user dismissal commands (e.g. "go kate", "bye kate", "stop", "dismiss")
+        dismiss_pattern = re.compile(
+            r"\b(?:go\s+kate|kate\s+go|bye\s+kate|kate\s+bye|bye|goodbye|good\s+bye|sleep|stop|quit|exit|dismiss|shut\s+up|chup|bas\s+kate|bas|alvida|band\s+karo|so\s+jao|kuch\s+nahi|nothing)\b",
+            re.IGNORECASE
+        )
+        clean = text.strip()
+        if dismiss_pattern.search(clean):
+            self.end_conversation_session(speak_goodbye=True)
+            return
+
+        play_chime("success")
+        self.orb.set_state("thinking")
+        self.status_label.setText("Thinking...")
         self._execute_query(text)
 
-    def _on_voice_failed(self, err_msg: str):
+    def _on_session_speech_failed(self, err_msg: str):
+        """Handles silence during continuous conversation without abruptly killing the session."""
+        if not self.session_active:
+            return
+        self.silence_count += 1
+        # Patiently loop for up to 8 cycles of silence (~56 seconds of silence)
+        if self.silence_count < 8:
+            self.orb.set_state("listening")
+            self.status_label.setText("Listening... (say 'go kate' to stop)")
+            self._start_session_voice_capture()
+        else:
+            # Over 56 seconds of continuous silence -> auto-sleep
+            self.end_conversation_session(speak_goodbye=False)
+
+    def end_conversation_session(self, speak_goodbye: bool = False):
+        """Terminates active conversation session and returns to ambient wake listener."""
+        self.session_active = False
+        self.silence_count = 0
+        if hasattr(self, "_voice_worker") and self._voice_worker and self._voice_worker.isRunning():
+            try:
+                self._voice_worker.speech_recognized.disconnect()
+                self._voice_worker.speech_failed.disconnect()
+            except Exception:
+                pass
+
+        if speak_goodbye and self.speaker.enabled:
+            self.orb.set_state("speaking")
+            self.status_label.setText("Goodbye!")
+            self._add_chat_bubble("Goodbye, Satyam!", is_user=False, badge="⚡ Kate")
+            self.speaker.speak(
+                "Goodbye, Satyam!",
+                on_done_callback=lambda: QMetaObject.invokeMethod(
+                    self,
+                    "_on_session_closed_safe",
+                    Qt.ConnectionType.QueuedConnection
+                )
+            )
+        else:
+            self._on_session_closed_safe()
+
+    @pyqtSlot()
+    def _on_session_closed_safe(self):
+        """Resets UI to idle and safely re-enables ambient wake-word listener."""
         self.orb.set_state("idle")
         self.status_label.setText("Ready")
         if self.wake_listener:
@@ -1315,86 +1385,28 @@ class SiriWindow(QWidget):
                 )
             )
         else:
-            self.orb.set_state("idle")
-            self._on_response_complete()
+            self._on_speech_done_safe()
 
     @pyqtSlot()
     def _on_speech_done_safe(self):
         """Thread-safe UI handler invoked when voice speaking terminates."""
-        if getattr(self, "continuous_talk_enabled", True):
+        if self.session_active:
+            # Conversation is ongoing! Keep listening for the next command or follow-up!
             self.orb.set_state("listening")
-            self.status_label.setText("Listening... speak now")
-            self._trigger_continuous_voice_capture()
+            self.status_label.setText("Listening... (say 'go kate' to stop)")
+            self._start_session_voice_capture()
         else:
-            self.orb.set_state("idle")
-            self.status_label.setText("Ready")
-            self._on_response_complete()
-
-    def _trigger_continuous_voice_capture(self):
-        """Listens for follow-up voice input in continuous conversation mode."""
-        if hasattr(self, "_voice_worker") and self._voice_worker and self._voice_worker.isRunning():
-            return
-        if self.wake_listener:
-            self.wake_listener.pause()
-        self._voice_worker = VoiceRecognitionWorker(timeout=6, phrase_time_limit=10)
-        self._voice_worker.speech_recognized.connect(self._on_continuous_voice_recognized)
-        self._voice_worker.speech_failed.connect(self._on_continuous_voice_failed)
-        self._voice_worker.start()
-
-    def _on_continuous_voice_recognized(self, text: str):
-        dismiss_words = {
-            "bye", "goodbye", "good bye", "exit", "quit", "stop", "cancel",
-            "thank you", "thanks", "alvida", "bas", "kuch nahi", "nothing",
-            "band karo", "so jao", "sleep", "dismiss", "chup", "shut up"
-        }
-        clean = text.lower().strip()
-        if clean in dismiss_words or any(clean.startswith(w) for w in ["bye", "goodbye", "alvida", "bas", "nothing", "thank you", "thanks"]):
-            self.orb.set_state("idle")
-            self.status_label.setText("Ready")
-            self._add_chat_bubble(text, is_user=True)
-            self._add_chat_bubble("Goodbye, Satyam!", is_user=False, badge="⚡ Kate")
-            if self.speaker.enabled:
-                self.speaker.speak(
-                    "Goodbye, Satyam!",
-                    on_done_callback=lambda: QMetaObject.invokeMethod(
-                        self,
-                        "_on_speech_done_final",
-                        Qt.ConnectionType.QueuedConnection
-                    )
-                )
-            else:
-                self._on_response_complete()
-            return
-
-        play_chime("success")
-        self.orb.set_state("thinking")
-        self.status_label.setText("Thinking...")
-        self._execute_query(text)
-
-    @pyqtSlot()
-    def _on_speech_done_final(self):
-        self.orb.set_state("idle")
-        self.status_label.setText("Ready")
-        self._on_response_complete()
-
-    def _on_continuous_voice_failed(self, err_msg: str):
-        # User finished speaking or timeout elapsed -> return to idle and resume wake listener
-        self.orb.set_state("idle")
-        self.status_label.setText("Ready")
-        self._on_response_complete()
-
-    def _on_response_complete(self):
-        if self.wake_listener:
-            self.wake_listener.resume()
-        self._reset_inactivity_timer()
+            self._on_session_closed_safe()
 
     def _on_query_error(self, err_msg: str):
-        self.orb.set_state("idle")
         self.status_label.setText("Error processing request")
         self._add_chat_bubble(f"Error: {err_msg}", is_user=False, badge="⚠️ Error")
-        if self.wake_listener:
-            self.wake_listener.resume()
-        self._reset_inactivity_timer()
+        if self.session_active:
+            self.orb.set_state("listening")
+            self.status_label.setText("Listening... (say 'go kate' to stop)")
+            self._start_session_voice_capture()
+        else:
+            self._on_session_closed_safe()
 
     # ── Chat Bubbles & History ─────────────────────────────────────────────
 

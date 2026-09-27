@@ -14,19 +14,14 @@ from PyQt6.QtCore import QObject, pyqtSignal, QMetaObject, Qt, Q_ARG
 
 logger = logging.getLogger("kate.wake_word")
 
-# Broad wake word patterns including English, Hinglish, and Hindi (Devanagari + Romanized)
+# Strict wake word patterns: Requires addressing Kate (or Jarvis) directly
 WAKE_INVOCATION_REGEX = re.compile(
-    r"\b(?:hey\s+|hi\s+|hello\s+|ok\s+|okay\s+|listen\s+|wake\s+up\s+|suno\s+|arre\s+|oye\s+|सुनो\s+|नमस्ते\s+|हे\s+)?(?:kate|cate|kayt|kait|kat|ket|keth|keith|kathy|kade|packet|cricket|ticket|pocket|cake|kite|cat|jarvis|केट|कैट|केत|जार्विस)\b[,:\s]*",
+    r"\b(?:hey\s+|hi\s+|hello\s+|ok\s+|okay\s+|listen\s+|wake\s+up\s+|suno\s+|arre\s+|oye\s+|सुनो\s+|नमस्ते\s+|हे\s+)?(?:kate|cate|kayt|kait|kat|ket|keth|keith|kathy|kade|cricket|jarvis|केट|कैट|केत|जार्विस)\b[,:\s]*",
     re.IGNORECASE
 )
 
 WAKE_REGEX = re.compile(
-    r"\b(?:hey\s+|hi\s+|hello\s+|ok\s+|listen\s+|wake\s+up\s+|suno\s+|arre\s+|oye\s+|सुनो\s+|नमस्ते\s+|हे\s+)?(?:kate|cate|kayt|kait|kat|ket|keth|keith|kit|cat|kite|cake|kathy|kade|packet|cricket|ticket|pocket|jarvis|केट|कैट|केत|जार्विस)\b",
-    re.IGNORECASE
-)
-
-DIRECT_COMMAND_REGEX = re.compile(
-    r"^(?:open\s+|play\s+|search\s+|google\s+|launch\s+|close\s+|start\s+|show\s+|what\s+is\s+|who\s+is\s+|how\s+to\s+|tell\s+me\s+|यूट्यूब\s+|गाना\s+|खोलो|चलाओ|बजाओ|दिखाओ)",
+    r"\b(?:hey\s+|hi\s+|hello\s+|ok\s+|listen\s+|wake\s+up\s+|suno\s+|arre\s+|oye\s+|सुनो\s+|नमस्ते\s+|हे\s+)?(?:kate|cate|kayt|kait|kat|ket|keth|keith|kit|kathy|kade|cricket|jarvis|केट|कैट|केत|जार्विस)\b",
     re.IGNORECASE
 )
 
@@ -287,10 +282,6 @@ class WakeWordListener(QObject):
                     logger.info(f"✨ Wake word matched in '{text}'! Summoning Kate...")
                     print(f"[Kate WakeWord] ✨ Wake word matched in '{text}'! Summoning Kate...", flush=True)
                     self._trigger()
-            elif DIRECT_COMMAND_REGEX.search(text):
-                logger.info(f"✨ Direct command matched in '{text}'! Executing...")
-                print(f"[Kate WakeWord] ✨ Direct command matched in '{text}'! Executing...", flush=True)
-                self._trigger_with_command(text)
 
     def _trigger_with_command(self, cmd: str):
         """Play Siri chime and execute command on Qt main thread without asking user to repeat."""

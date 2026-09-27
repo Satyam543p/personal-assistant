@@ -110,8 +110,25 @@ def ensure_daemon_running():
     print("[Kate] Warning: Daemon did not respond within 5s. Running in standalone mode.")
 
 
+_single_instance_mutex = None
+
+
 def run_siri_app():
+    global _single_instance_mutex
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    # Prevent duplicate UI instances from running concurrently
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            ERROR_ALREADY_EXISTS = 183
+            _single_instance_mutex = kernel32.CreateMutexW(None, False, "Local\\KateAssistantSingleInstanceMutex")
+            if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+                print("[Kate] Another Kate Assistant UI instance is already running. Exiting cleanly.")
+                sys.exit(0)
+        except Exception as e:
+            logger.warning(f"Failed to acquire single-instance mutex: {e}")
 
     # Attach thread to interactive user desktop ("Default")
     if os.name == "nt":

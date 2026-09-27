@@ -253,20 +253,20 @@ class VoiceRecognitionWorker(QThread):
             r.operation_timeout = 8
             r.pause_threshold = 0.8
             r.phrase_threshold = 0.2
-            r.dynamic_energy_threshold = False
-            r.energy_threshold = 120
+            r.dynamic_energy_threshold = True
 
             mic_idx = find_working_microphone()
             try:
                 with sr.Microphone(device_index=mic_idx) as source:
-                    r.adjust_for_ambient_noise(source, duration=0.4)
-                    r.energy_threshold = max(70, min(r.energy_threshold + 40, 220))
+                    r.adjust_for_ambient_noise(source, duration=0.5)
+                    r.energy_threshold = max(300.0, r.energy_threshold)
                     audio = r.listen(source, timeout=7, phrase_time_limit=12)
             except Exception:
                 # Force refresh mic discovery if hardware state changed
                 mic_idx = find_working_microphone(force_refresh=True)
                 with sr.Microphone(device_index=mic_idx) as source:
-                    r.adjust_for_ambient_noise(source, duration=0.4)
+                    r.adjust_for_ambient_noise(source, duration=0.5)
+                    r.energy_threshold = max(300.0, r.energy_threshold)
                     audio = r.listen(source, timeout=7, phrase_time_limit=12)
 
             text = None
@@ -844,7 +844,7 @@ class SiriWindow(QWidget):
         cap_l.addWidget(self.orb)
 
         # Voice Status & Live Soundwave
-        self.status_label = QLabel("Listening... speak now", self.voice_capsule)
+        self.status_label = QLabel("Say 'Hey Kate' or press Ctrl+Space", self.voice_capsule)
         self.status_label.setStyleSheet("color:#F8FAFC; font-size:13px; font-weight:500; font-family:'Segoe UI',system-ui,sans-serif;")
         cap_l.addWidget(self.status_label)
 
@@ -952,6 +952,10 @@ class SiriWindow(QWidget):
         self._reset_inactivity_timer()
         if start_voice:
             self._trigger_voice_capture()
+        else:
+            self.orb.set_state("idle")
+            self.soundwave.set_active(False)
+            self.status_label.setText("Say 'Hey Kate' or press Ctrl+Space")
 
     @pyqtSlot(str)
     def summon_with_command(self, query: str):

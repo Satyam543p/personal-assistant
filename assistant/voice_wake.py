@@ -168,15 +168,14 @@ class WakeWordListener(QObject):
             r.pause_threshold = 0.5           # Snappy end-of-phrase detection
             r.phrase_threshold = 0.2          # Catch short quick words like "Kate"
             r.non_speaking_duration = 0.3
-            r.dynamic_energy_threshold = False # Keep fixed threshold to prevent sensitivity drift
-            r.energy_threshold = 120           # Perfect sensitivity for spoken voice
+            r.dynamic_energy_threshold = True # Dynamically adapt to microphone volume & room acoustics
 
             mic = sr.Microphone(device_index=self._mic_index)
             with mic as source:
-                r.adjust_for_ambient_noise(source, duration=0.6)
-                # Calibrate sensitivity to reliably detect normal room speaking volume
-                r.energy_threshold = max(70, min(r.energy_threshold + 40, 220))
-                print(f"[Kate WakeWord] Calibrated mic energy threshold: {r.energy_threshold:.1f}")
+                r.adjust_for_ambient_noise(source, duration=0.8)
+                r.energy_threshold = max(300.0, r.energy_threshold)
+                logger.info(f"Calibrated mic energy threshold: {r.energy_threshold:.1f}")
+                print(f"[Kate WakeWord] Calibrated mic energy threshold: {r.energy_threshold:.1f}", flush=True)
 
             def audio_callback(recognizer, audio):
                 if not self._running or self._paused or self._is_recognizing:
@@ -194,14 +193,15 @@ class WakeWordListener(QObject):
             self._mic_source = mic
             self._audio_callback = audio_callback
             self._start_listening_stream()
-            print("[Kate WakeWord] Continuous ambient listener is active & listening...")
+            logger.info("Continuous ambient listener is active & listening...")
+            print("[Kate WakeWord] Continuous ambient listener is active & listening...", flush=True)
 
             while self._running:
                 time.sleep(0.5)
 
         except Exception as e:
             logger.warning(f"Continuous wake-word engine failed to initialize: {e}")
-            print(f"[Kate WakeWord] Warning: Mic listener could not start ({e}). Hotkeys still active.")
+            print(f"[Kate WakeWord] Warning: Mic listener could not start ({e}). Hotkeys still active.", flush=True)
 
     def _start_listening_stream(self):
         if hasattr(self, "_recognizer") and hasattr(self, "_mic_source") and hasattr(self, "_audio_callback"):
@@ -213,7 +213,7 @@ class WakeWordListener(QObject):
                 self._stop_listening_fn = None
             try:
                 self._stop_listening_fn = self._recognizer.listen_in_background(
-                    self._mic_source, self._audio_callback, phrase_time_limit=4
+                    self._mic_source, self._audio_callback, phrase_time_limit=5
                 )
             except Exception as e:
                 logger.debug(f"Restarting listening stream error: {e}")
@@ -251,6 +251,7 @@ class WakeWordListener(QObject):
                 pass
 
         if text and not self._paused:
+            logger.info(f"Kate WakeWord Heard: '{text}'")
             print(f"[Kate WakeWord] Heard: '{text}'", flush=True)
             m = WAKE_INVOCATION_REGEX.search(text)
             if m:
@@ -258,9 +259,11 @@ class WakeWordListener(QObject):
                 cmd = text[m.end():].strip()
                 cmd = re.sub(r"^[,:\s]+", "", cmd).strip()
                 if cmd and len(cmd) >= 2:
+                    logger.info(f"✨ Wake word + command detected: '{cmd}'! Executing...")
                     print(f"[Kate WakeWord] ✨ Wake word + command detected: '{cmd}'! Executing...", flush=True)
                     self._trigger_with_command(cmd)
                 else:
+                    logger.info(f"✨ Wake word matched in '{text}'! Summoning Kate...")
                     print(f"[Kate WakeWord] ✨ Wake word matched in '{text}'! Summoning Kate...", flush=True)
                     self._trigger()
 

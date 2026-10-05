@@ -98,6 +98,12 @@ class NeuralVoiceSpeaker:
         self.enabled = (os.environ.get("JARVIS_MUTE_SOUNDS") != "1" and os.environ.get("KATE_SILENT_MODE") != "1")
         self._sapi_voice = None
         self._edge_available = False
+        try:
+            from assistant.tts.manager import TTSManager
+            self._manager = TTSManager(auto_prewarm=True)
+        except Exception as e:
+            logger.warning(f"Could not initialize TTSManager: {e}")
+            self._manager = None
         self._setup()
 
     @classmethod
@@ -159,10 +165,20 @@ class NeuralVoiceSpeaker:
 
     def speak(self, text: str, on_done_callback=None):
         if not self.enabled or not text:
+            if on_done_callback:
+                on_done_callback()
             return
+
+        # Use new modular TTSManager (Kokoro-ONNX primary, Edge-TTS fallback)
+        if self._manager and self._manager.enabled:
+            self._manager.speak(text, on_done_callback=on_done_callback)
+            return
+
         clean = self._strip_markdown(text)
         clean = self._trim_for_speech(clean)
         if not clean:
+            if on_done_callback:
+                on_done_callback()
             return
 
         if self._edge_available:
@@ -283,6 +299,11 @@ class NeuralVoiceSpeaker:
                 pass
 
     def stop(self):
+        if hasattr(self, "_manager") and self._manager:
+            try:
+                self._manager.stop()
+            except Exception:
+                pass
         try:
             import pygame
             if pygame.mixer.get_init():

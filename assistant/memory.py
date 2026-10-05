@@ -26,6 +26,7 @@ try:
     )
     from assistant.router import MemoryManager
     from assistant.tools import Tool
+    from assistant.safety import redact_secrets
 except ModuleNotFoundError:
     from config import (
         EMBEDDING_PROVIDER,
@@ -40,6 +41,7 @@ except ModuleNotFoundError:
     )
     from router import MemoryManager
     from tools import Tool
+    from safety import redact_secrets
 
 logger = logging.getLogger("jarvis.memory")
 
@@ -638,6 +640,7 @@ class JarvisMemoryManager(MemoryRepository, MemoryManager):
         """
         now = int(time.time())
         m_id = memory_id or f"mem_{now}_{int(time.time() * 1000) % 1000}"
+        content = redact_secrets(content)
 
         # 1. Specificity & Importance Calculation
         spec = specificity_weight if specificity_weight is not None else compute_specificity(content)
@@ -1198,6 +1201,7 @@ class JarvisMemoryManager(MemoryRepository, MemoryManager):
         """
         Creates an opt-in proposal for remembering a project-specific fact (Section 43).
         """
+        content = redact_secrets(content)
         prompt = f"Want me to remember that project '{project_id}' uses '{content}'?"
         proposal = {
             "project_id": project_id,

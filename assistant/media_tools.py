@@ -11,11 +11,13 @@ import time
 from urllib.parse import urlparse
 
 try:
-    from assistant.tools import Tool, JarvisToolExecutor
+    from assistant.tools import Tool, ToolResult, ErrorCode, normalize_tool_result
     from assistant.database.manager import DatabaseManager
+    from assistant.download_manager import DownloadManager, AbstractDownloadManager
 except ModuleNotFoundError:
-    from tools import Tool, JarvisToolExecutor
+    from tools import Tool, ToolResult, ErrorCode, normalize_tool_result
     from database.manager import DatabaseManager
+    from download_manager import DownloadManager, AbstractDownloadManager
 
 logger = logging.getLogger("jarvis.media_tools")
 
@@ -118,17 +120,18 @@ class JarvisMediaExtractor(MediaExtractor):
     and structured output subfolders (videos/, audio/, transcripts/).
     """
 
-    MAX_VIDEO_DURATION_SECONDS = 10800       # 3 hours maximum
-    MAX_AUDIO_DURATION_SECONDS = 7200        # 2 hours maximum
-    MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024 # 500 MB maximum
-    MAX_AUDIO_SIZE_BYTES = 150 * 1024 * 1024 # 150 MB maximum
-    MIN_DISK_FREE_BYTES = 1500 * 1024 * 1024 # Require 1.5 GB free disk space
+    MAX_VIDEO_DURATION_SECONDS = 10800        # 3 hours maximum
+    MAX_AUDIO_DURATION_SECONDS = 7200         # 2 hours maximum
+    MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB maximum
+    MAX_AUDIO_SIZE_BYTES = 150 * 1024 * 1024  # 150 MB maximum
+    MIN_DISK_FREE_BYTES = 1500 * 1024 * 1024  # Require 1.5 GB free disk space
 
     def __init__(
         self,
         db_manager: DatabaseManager | None = None,
         default_media_dir: str | None = None,
-        trusted_domains: set[str] | None = None
+        trusted_domains: set[str] | None = None,
+        download_manager: AbstractDownloadManager | None = None
     ):
         self.db = db_manager
         self.media_dir = default_media_dir or os.path.abspath(os.path.join(os.getcwd(), "media"))
@@ -140,8 +143,9 @@ class JarvisMediaExtractor(MediaExtractor):
             os.makedirs(d, exist_ok=True)
 
         self.trusted_domains = trusted_domains or set(DEFAULT_TRUSTED_DOMAINS)
-        self.ytdlp_bin = shutil.which("yt-dlp")
-        self.ffmpeg_bin = shutil.which("ffmpeg")
+        self.download_manager = download_manager or DownloadManager(media_dir=self.media_dir)
+        self.ytdlp_bin = self.download_manager.ytdlp_bin
+        self.ffmpeg_bin = self.download_manager.ffmpeg_bin
 
     # -----------------------------------------------------------------
     # Windows Filename & Disk Space Guards
@@ -235,129 +239,89 @@ class JarvisMediaExtractor(MediaExtractor):
         if not is_valid:
             return {"status": "failure", "error": f"Invalid media source: {err}"}
 
+        # DRM Protection check
+        if self.download_manager.is_drm_protected(source):
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.DRM_PROTECTED,
+                message="This content is DRM-protected and cannot be downloaded.",
+                status="failure"
+            ).to_dict()
+
         target_dir = output_dir or self.videos_dir
         os.makedirs(target_dir, exist_ok=True)
 
-        # 1. Disk space check
-        ok_space, space_err = self.check_disk_space(target_dir)
+        # 1. Dynamic Disk space check (2.0x safety factor)
+        ok_space, space_err, req_bytes = self.download_manager.check_disk_space(target_dir)
         if not ok_space:
-            return {"status": "failure", "error": space_err}
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.DISK_FULL,
+                message=space_err,
+                status="failure"
+            ).to_dict()
 
         # 2. Check metadata to enforce duration cap
         meta = await self.get_media_metadata(source)
         dur = meta.get("duration_seconds", 0)
         if dur > self.MAX_VIDEO_DURATION_SECONDS:
-            return {
-                "status": "failure",
-                "error": f"Video rejected: Duration ({dur}s) exceeds maximum cap of {self.MAX_VIDEO_DURATION_SECONDS}s (3 hours)."
-            }
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.EXECUTION_FAILED,
+                message=f"Video rejected: Duration ({dur}s) exceeds maximum cap of {self.MAX_VIDEO_DURATION_SECONDS}s (3 hours).",
+                status="failure"
+            ).to_dict()
 
         title = filename or meta.get("title", f"video_{int(time.time())}")
         clean_title = self.sanitize_filename(title)
-        out_file = os.path.join(target_dir, f"{clean_title}.{format}")
+        out_file = self.download_manager.get_collision_free_path(target_dir, clean_title, format)
 
         # Check for existing non-empty file (skip duplicate download)
         if os.path.exists(out_file) and os.path.getsize(out_file) > 1024:
             sz = os.path.getsize(out_file)
-            return {
-                "status": "success",
-                "source": source,
-                "video_path": out_file,
-                "title": clean_title,
-                "resolution": resolution,
-                "format": format,
-                "size_bytes": sz,
-                "is_cached": True,
-                "response": f"Video '{clean_title}' is already downloaded at `{out_file}` ({round(sz / (1024*1024), 2)} MB)."
-            }
+            return ToolResult(
+                ok=True,
+                data={
+                    "source": source,
+                    "video_path": out_file,
+                    "title": clean_title,
+                    "resolution": resolution,
+                    "format": format,
+                    "size_bytes": sz,
+                    "is_cached": True
+                },
+                message=f"Video '{clean_title}' is already downloaded at `{out_file}` ({round(sz / (1024*1024), 2)} MB).",
+                status="success"
+            ).to_dict()
 
         # Local source file copy
         if stype == "local_file":
             shutil.copyfile(source, out_file)
             sz = os.path.getsize(out_file)
-            return {
-                "status": "success",
-                "source": source,
-                "video_path": out_file,
-                "title": clean_title,
-                "resolution": resolution,
-                "format": format,
-                "size_bytes": sz,
-                "response": f"Video saved to `{out_file}` ({round(sz / 1024, 1)} KB)."
-            }
+            return ToolResult(
+                ok=True,
+                data={
+                    "source": source,
+                    "video_path": out_file,
+                    "title": clean_title,
+                    "resolution": resolution,
+                    "format": format,
+                    "size_bytes": sz
+                },
+                message=f"Video saved to `{out_file}` ({round(sz / 1024, 1)} KB).",
+                status="success"
+            ).to_dict()
 
-        # Remote download via yt-dlp
-        if self.ytdlp_bin:
-            try:
-                # Format string based on requested resolution
-                h_limit = "720"
-                if "1080" in resolution:
-                    h_limit = "1080"
-                elif "480" in resolution:
-                    h_limit = "480"
-                elif "360" in resolution:
-                    h_limit = "360"
-                elif "best" in resolution:
-                    h_limit = "2160"
-
-                fmt_selector = f"bestvideo[height<={h_limit}]+bestaudio/best[height<={h_limit}]/best"
-                out_tmpl = os.path.join(target_dir, f"{clean_title}.%(ext)s")
-
-                cmd = [
-                    self.ytdlp_bin,
-                    "--no-playlist",
-                    "-f", fmt_selector,
-                    "--merge-output-format", format,
-                    "-o", out_tmpl,
-                    "--max-filesize", f"{self.MAX_VIDEO_SIZE_BYTES}",
-                    source
-                ]
-                if self.ffmpeg_bin:
-                    cmd.extend(["--ffmpeg-location", os.path.dirname(self.ffmpeg_bin)])
-
-                loop = asyncio.get_event_loop()
-                proc = await loop.run_in_executor(
-                    None,
-                    lambda: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=240)
-                )
-
-                # Look for output file matching clean_title
-                matched_files = [f for f in os.listdir(target_dir) if f.startswith(clean_title)]
-                if matched_files:
-                    actual_path = os.path.join(target_dir, matched_files[0])
-                    sz = os.path.getsize(actual_path)
-                    return {
-                        "status": "success",
-                        "source": source,
-                        "video_path": actual_path,
-                        "title": clean_title,
-                        "resolution": resolution,
-                        "format": os.path.splitext(actual_path)[1].lstrip("."),
-                        "size_bytes": sz,
-                        "response": f"Downloaded video '{clean_title}' ({resolution}, {round(sz / (1024*1024), 2)} MB) to `{actual_path}`."
-                    }
-                else:
-                    err_out = proc.stderr.decode("utf-8", errors="ignore")
-                    logger.warning(f"yt-dlp video download returned code {proc.returncode}: {err_out[:200]}")
-            except Exception as e:
-                logger.error(f"yt-dlp video execution error: {e}")
-
-        # Fallback simulator for offline/test environments
-        with open(out_file, "wb") as f:
-            f.write(b"\x00\x00\x00 ftypisom\x00\x00\x02\x00isomiso2avc1mp41")
-            f.write(os.urandom(1024 * 64))
-
-        sz = os.path.getsize(out_file)
-        return {
-            "status": "success",
-            "source": source,
-            "video_path": out_file,
-            "title": clean_title,
-            "resolution": resolution,
-            "format": format,
-            "size_bytes": sz,
-            "response": f"Downloaded video '{clean_title}' ({resolution}) to `{out_file}` ({round(sz / 1024, 1)} KB)."
-        }
+        # Remote download via isolated DownloadManager
+        res = await self.download_manager.start_download(
+            url=source,
+            download_type="video",
+            output_dir=target_dir,
+            resolution=resolution,
+            format=format,
+            filename=clean_title
+        )
+        return res.to_dict()
 
     # -----------------------------------------------------------------
     # Audio Extraction (with bitrate and resource caps)
@@ -372,7 +336,16 @@ class JarvisMediaExtractor(MediaExtractor):
     ) -> dict:
         is_valid, stype, err = self.validate_source(source)
         if not is_valid:
-            return {"status": "failure", "error": f"Invalid media source: {err}"}
+            return ToolResult(ok=False, error_code=ErrorCode.NOT_FOUND, message=f"Invalid media source: {err}", status="failure").to_dict()
+
+        # DRM Protection check
+        if self.download_manager.is_drm_protected(source):
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.DRM_PROTECTED,
+                message="This content is DRM-protected and cannot be downloaded.",
+                status="failure"
+            ).to_dict()
 
         target_dir = output_dir or self.audio_dir
         os.makedirs(target_dir, exist_ok=True)
@@ -380,34 +353,45 @@ class JarvisMediaExtractor(MediaExtractor):
         if format not in ("mp3", "wav", "m4a", "aac", "ogg", "flac"):
             format = "mp3"
 
-        ok_space, space_err = self.check_disk_space(target_dir)
+        # Dynamic Disk space check
+        ok_space, space_err, req_bytes = self.download_manager.check_disk_space(target_dir)
         if not ok_space:
-            return {"status": "failure", "error": space_err}
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.DISK_FULL,
+                message=space_err,
+                status="failure"
+            ).to_dict()
 
         meta = await self.get_media_metadata(source)
         dur = meta.get("duration_seconds", 0)
         if dur > self.MAX_AUDIO_DURATION_SECONDS:
-            return {
-                "status": "failure",
-                "error": f"Audio rejected: Duration ({dur}s) exceeds maximum cap of {self.MAX_AUDIO_DURATION_SECONDS}s (2 hours)."
-            }
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.EXECUTION_FAILED,
+                message=f"Audio rejected: Duration ({dur}s) exceeds maximum cap of {self.MAX_AUDIO_DURATION_SECONDS}s (2 hours).",
+                status="failure"
+            ).to_dict()
 
         title = self.sanitize_filename(meta.get("title", "audio_track"))
-        out_file = os.path.join(target_dir, f"{title}.{format}")
+        out_file = self.download_manager.get_collision_free_path(target_dir, title, format)
 
         # Check existing cached audio
         if os.path.exists(out_file) and os.path.getsize(out_file) > 1024:
             sz = os.path.getsize(out_file)
-            return {
-                "status": "success",
-                "source": source,
-                "audio_path": out_file,
-                "format": format,
-                "bitrate": bitrate,
-                "size_bytes": sz,
-                "is_cached": True,
-                "response": f"Audio for '{title}' is already extracted at `{out_file}` ({round(sz / 1024, 1)} KB)."
-            }
+            return ToolResult(
+                ok=True,
+                data={
+                    "source": source,
+                    "audio_path": out_file,
+                    "format": format,
+                    "bitrate": bitrate,
+                    "size_bytes": sz,
+                    "is_cached": True
+                },
+                message=f"Audio for '{title}' is already extracted at `{out_file}` ({round(sz / 1024, 1)} KB).",
+                status="success"
+            ).to_dict()
 
         # Local audio conversion via ffmpeg
         if stype == "local_file":
@@ -421,71 +405,30 @@ class JarvisMediaExtractor(MediaExtractor):
                     )
                     if proc.returncode == 0 and os.path.exists(out_file):
                         sz = os.path.getsize(out_file)
-                        return {
-                            "status": "success",
-                            "source": source,
-                            "audio_path": out_file,
-                            "format": format,
-                            "bitrate": bitrate,
-                            "size_bytes": sz,
-                            "response": f"Extracted {format.upper()} audio via ffmpeg saved to `{out_file}` ({round(sz / 1024, 1)} KB)."
-                        }
+                        return ToolResult(
+                            ok=True,
+                            data={
+                                "source": source,
+                                "audio_path": out_file,
+                                "format": format,
+                                "bitrate": bitrate,
+                                "size_bytes": sz
+                            },
+                            message=f"Extracted {format.upper()} audio via ffmpeg saved to `{out_file}` ({round(sz / 1024, 1)} KB).",
+                            status="success"
+                        ).to_dict()
                 except Exception as e:
                     logger.warning(f"ffmpeg conversion error: {e}")
 
-        # Remote audio extraction via yt-dlp
-        if stype == "remote_url" and self.ytdlp_bin:
-            try:
-                out_tmpl = os.path.join(target_dir, f"{title}.%(ext)s")
-                cmd = [
-                    self.ytdlp_bin,
-                    "--no-playlist",
-                    "-x",
-                    "--audio-format", format,
-                    "--audio-quality", bitrate,
-                    "-o", out_tmpl,
-                    source
-                ]
-                if self.ffmpeg_bin:
-                    cmd.extend(["--ffmpeg-location", os.path.dirname(self.ffmpeg_bin)])
-
-                loop = asyncio.get_event_loop()
-                proc = await loop.run_in_executor(
-                    None,
-                    lambda: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-                )
-
-                matched = [f for f in os.listdir(target_dir) if f.startswith(title)]
-                if matched:
-                    actual = os.path.join(target_dir, matched[0])
-                    sz = os.path.getsize(actual)
-                    return {
-                        "status": "success",
-                        "source": source,
-                        "audio_path": actual,
-                        "format": format,
-                        "bitrate": bitrate,
-                        "size_bytes": sz,
-                        "response": f"Extracted {format.upper()} audio for '{title}' saved to `{actual}` ({round(sz / 1024, 1)} KB)."
-                    }
-            except Exception as e:
-                logger.warning(f"yt-dlp audio extraction error: {e}")
-
-        # Fallback generator for test/offline
-        with open(out_file, "wb") as f:
-            f.write(b"ID3\x04\x00\x00\x00\x00\x00#TSSE\x00\x00\x00\x0f\x00\x00\x03Lavf58.29.100\x00")
-            f.write(os.urandom(1024 * 64))
-
-        sz = os.path.getsize(out_file)
-        return {
-            "status": "success",
-            "source": source,
-            "audio_path": out_file,
-            "format": format,
-            "bitrate": bitrate,
-            "size_bytes": sz,
-            "response": f"Extracted {format.upper()} audio saved to `{out_file}` ({round(sz / 1024, 1)} KB)."
-        }
+        # Remote audio extraction via DownloadManager
+        res = await self.download_manager.start_download(
+            url=source,
+            download_type="audio",
+            output_dir=target_dir,
+            format=format,
+            filename=title
+        )
+        return res.to_dict()
 
     # -----------------------------------------------------------------
     # Subtitle / Transcript Extraction & Timestamp Formatting
@@ -545,7 +488,7 @@ class JarvisMediaExtractor(MediaExtractor):
                     cmd.append("--write-auto-sub")
 
                 loop = asyncio.get_event_loop()
-                proc = await loop.run_in_executor(
+                _ = await loop.run_in_executor(
                     None,
                     lambda: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
                 )
@@ -911,16 +854,17 @@ class DownloadVideoTool(Tool):
     async def execute(self, executor, **kwargs) -> dict:
         source = kwargs.get("source") or kwargs.get("url") or kwargs.get("file_ref")
         if not source:
-            return {"status": "failure", "error": "No video source or URL provided."}
+            return ToolResult(ok=False, error_code=ErrorCode.NOT_FOUND, message="No video source or URL provided.", status="failure").to_dict()
         resolution = kwargs.get("resolution", "720p")
         fmt = kwargs.get("format", "mp4")
         output_dir = kwargs.get("output_dir")
-        return await self.extractor.download_video(
+        res = await self.extractor.download_video(
             source=source,
             output_dir=output_dir,
             resolution=resolution,
             format=fmt
         )
+        return normalize_tool_result(res)
 
 
 class ExtractAudioTool(Tool):
@@ -965,16 +909,78 @@ class ExtractAudioTool(Tool):
     async def execute(self, executor, **kwargs) -> dict:
         source = kwargs.get("source") or kwargs.get("url") or kwargs.get("file_ref")
         if not source:
-            return {"status": "failure", "error": "No media source or URL provided."}
+            return ToolResult(ok=False, error_code=ErrorCode.NOT_FOUND, message="No media source or URL provided.", status="failure").to_dict()
         format = kwargs.get("format", "mp3")
         bitrate = kwargs.get("bitrate", "192k")
         output_dir = kwargs.get("output_dir")
-        return await self.extractor.extract_audio(
+        res = await self.extractor.extract_audio(
             source=source,
             output_dir=output_dir,
             format=format,
             bitrate=bitrate
         )
+        return normalize_tool_result(res)
+
+
+class CancelDownloadTool(Tool):
+    """
+    Cancels an active background media download process tree (yt-dlp + ffmpeg)
+    and removes partial temporary files.
+    """
+
+    def __init__(self, extractor: MediaExtractor):
+        declaration = {
+            "inputs": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "Optional specific download job ID. If omitted, cancels the most recent active download."
+                    }
+                }
+            },
+            "side_effects": "none",
+            "timeout_ms": 15000,
+            "memory_limit_mb": 50
+        }
+        super().__init__("cancel_download", "reversible", declaration)
+        self.extractor = extractor
+
+    async def execute(self, executor, **kwargs) -> dict:
+        job_id = kwargs.get("job_id")
+        dm = getattr(self.extractor, "download_manager", None)
+        if not dm:
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.TOOL_MISSING,
+                message="Download manager is not initialized.",
+                status="failure"
+            ).to_dict()
+
+        if not job_id:
+            active_jobs = dm.list_jobs(active_only=True)
+            if not active_jobs:
+                return ToolResult(
+                    ok=True,
+                    message="No active downloads found to cancel.",
+                    status="success"
+                ).to_dict()
+            job_id = active_jobs[-1].job_id
+
+        success = await dm.cancel_download(job_id)
+        if success:
+            return ToolResult(
+                ok=True,
+                message=f"Download job {job_id} cancelled and cleaned up.",
+                status="success"
+            ).to_dict()
+        else:
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.NOT_FOUND,
+                message=f"Could not cancel download job {job_id}.",
+                status="failure"
+            ).to_dict()
 
 
 class ExtractSubtitlesTool(Tool):

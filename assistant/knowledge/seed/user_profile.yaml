@@ -1,0 +1,12 @@
+﻿name: "Satyam Pandey"
+role: "Software Engineer & Student"
+education: "Computer Science and Engineering"
+timezone: "Asia/Kolkata"
+preferred_languages:
+  - "English"
+  - "Hindi"
+  - "Hinglish"
+system:
+  os: "Windows 11"
+  default_download_directory: "~/Downloads"
+  default_code_workspace: "c:/Users/Satyam Pandey/Desktop/personal assistent"

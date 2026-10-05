@@ -6,13 +6,14 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 try:
     from assistant.router import PlanExecutor
-    from assistant.projects import ProjectRegistry, ProjectMetadata
+    from assistant.projects import ProjectMetadata
 except ModuleNotFoundError:
     from router import PlanExecutor
-    from projects import ProjectRegistry, ProjectMetadata
+    from projects import ProjectMetadata
 
 logger = logging.getLogger("jarvis.planner")
 
@@ -429,95 +430,250 @@ class JarvisPlanner(PlanExecutor, Planner):
 
         return {"status": "success", "message": f"Step '{intent}' executed successfully."}
 
+    def _topological_levels(self, steps: list[PlanStep]) -> list[list[PlanStep]]:
+        """
+        Organizes plan steps into parallel execution waves using topological sorting.
+        Each wave contains steps whose dependencies were satisfied in earlier waves.
+        Detects circular dependencies and raises ValueError if cycles exist.
+        """
+        step_map = {s.step_id: s for s in steps}
+        in_degree = {s.step_id: 0 for s in steps}
+        graph: dict[str, list[str]] = {s.step_id: [] for s in steps}
+
+        for s in steps:
+            for dep in s.depends_on:
+                if dep in step_map:
+                    graph[dep].append(s.step_id)
+                    in_degree[s.step_id] += 1
+
+        queue = [s.step_id for s in steps if in_degree[s.step_id] == 0]
+        levels = []
+        visited_count = 0
+
+        while queue:
+            current_level_ids = queue[:]
+            queue = []
+            level_steps = [step_map[sid] for sid in current_level_ids]
+            levels.append(level_steps)
+            visited_count += len(current_level_ids)
+
+            for sid in current_level_ids:
+                for neighbor in graph[sid]:
+                    in_degree[neighbor] -= 1
+                    if in_degree[neighbor] == 0:
+                        queue.append(neighbor)
+
+        if visited_count < len(steps):
+            raise ValueError("Cyclic dependency detected in plan DAG.")
+
+        return levels
+
+    def _resolve_piped_inputs(self, val: Any, completed_steps: dict[str, PlanStep]) -> Any:
+        """
+        Resolves inter-step piping syntax like '$step_0.file_path' or '$step_0.result.data.path'.
+        Substitutes referenced output values before step execution.
+        """
+        if isinstance(val, dict):
+            return {k: self._resolve_piped_inputs(v, completed_steps) for k, v in val.items()}
+        elif isinstance(val, list):
+            return [self._resolve_piped_inputs(x, completed_steps) for x in val]
+        elif isinstance(val, str) and "$" in val:
+            m = re.match(r"^\$([a-zA-Z0-9_\-]+)(?:\.([a-zA-Z0-9_\.\-]+))?$", val.strip())
+            if m:
+                step_id = m.group(1)
+                prop_path = m.group(2)
+                target_step = completed_steps.get(step_id)
+                if not target_step:
+                    return val
+
+                if not prop_path:
+                    return target_step.result
+
+                curr: Any = target_step.result or {}
+                for part in prop_path.split("."):
+                    if isinstance(curr, dict) and part in curr:
+                        curr = curr[part]
+                    elif hasattr(curr, part):
+                        curr = getattr(curr, part)
+                    elif isinstance(target_step.inputs, dict) and part in target_step.inputs:
+                        curr = target_step.inputs[part]
+                    else:
+                        return val
+                return curr
+
+            def _sub(match):
+                sid = match.group(1)
+                path = match.group(2)
+                st = completed_steps.get(sid)
+                if not st:
+                    return match.group(0)
+                curr: Any = st.result or {}
+                if path:
+                    for part in path.split("."):
+                        if isinstance(curr, dict) and part in curr:
+                            curr = curr[part]
+                        elif isinstance(st.inputs, dict) and part in st.inputs:
+                            curr = st.inputs[part]
+                        else:
+                            return match.group(0)
+                return str(curr)
+
+            return re.sub(r"\$([a-zA-Z0-9_\-]+)(?:\.([a-zA-Z0-9_\.\-]+))?", _sub, val)
+
+        return val
+
     async def execute(self, plan: Plan) -> dict:
-        """Executes plan steps sequentially, halting and rolling back on failure."""
-        now = int(time.time())
+        """
+        Executes plan steps using DAG topological levels. Independent steps in the
+        same level execute in parallel. Inter-step piping is resolved before each step runs.
+        """
         plan.status = "running"
         self._update_plan_status(plan)
 
-        logger.info(f"Starting execution of plan '{plan.id}' with {len(plan.steps)} steps.")
+        logger.info(f"Starting DAG execution of plan '{plan.id}' with {len(plan.steps)} steps.")
 
-        completed_steps = []
+        try:
+            levels = self._topological_levels(plan.steps)
+        except ValueError as ve:
+            plan.status = "failed"
+            self._update_plan_status(plan)
+            return {
+                "status": "failure",
+                "plan_id": plan.id,
+                "error": str(ve),
+                "response": f"Plan DAG validation failed: {ve}",
+                "route": "planner"
+            }
+
+        completed_steps: dict[str, PlanStep] = {}
+        failed_steps: list[PlanStep] = []
         step_id_map = {s.step_id: s for s in plan.steps}
 
-        for idx, step in enumerate(plan.steps):
-            # Verify dependencies
-            for dep_id in step.depends_on:
-                dep_step = step_id_map.get(dep_id)
-                if not dep_step or dep_step.status != "done":
-                    err_msg = f"Prerequisite step '{dep_id}' was not completed (status: {getattr(dep_step, 'status', 'missing')})."
-                    logger.error(err_msg)
-                    step.status = "failed"
-                    step.error = err_msg
+        # Build descendant tree to mark skipped steps if a dependency fails
+        descendants: dict[str, set[str]] = {s.step_id: set() for s in plan.steps}
+        for s in plan.steps:
+            for dep in s.depends_on:
+                if dep in descendants:
+                    descendants[dep].add(s.step_id)
+
+        def _get_all_descendants(root_id: str) -> set[str]:
+            all_desc = set()
+            to_visit = list(descendants.get(root_id, []))
+            while to_visit:
+                curr = to_visit.pop(0)
+                if curr not in all_desc:
+                    all_desc.add(curr)
+                    to_visit.extend(descendants.get(curr, []))
+            return all_desc
+
+        for level_idx, level_steps in enumerate(levels):
+            ready_to_run = []
+            for step in level_steps:
+                # Check prerequisites
+                dep_failed = False
+                for dep_id in step.depends_on:
+                    dep_s = step_id_map.get(dep_id)
+                    if not dep_s or dep_s.status != "done":
+                        dep_failed = True
+                        break
+
+                if dep_failed:
+                    step.status = "skipped"
+                    step.error = "Skipped due to upstream dependency failure."
                     self._update_step_status(step)
+                else:
+                    ready_to_run.append(step)
 
-                    # Mark subsequent steps as skipped
-                    for skip_idx in range(idx + 1, len(plan.steps)):
-                        skip_step = plan.steps[skip_idx]
-                        skip_step.status = "skipped"
-                        self._update_step_status(skip_step)
+            if not ready_to_run:
+                continue
 
-                    plan.status = "failed"
-                    self._update_plan_status(plan)
-                    rollback_info = await self.rollback_plan(plan, idx)
-                    return {
-                        "status": "failure",
-                        "plan_id": plan.id,
-                        "failed_step_index": idx,
-                        "error": err_msg,
-                        "rollback": rollback_info,
-                        "route": "planner"
-                    }
+            async def _run_single(st: PlanStep):
+                # Resolve piping
+                resolved_inputs = self._resolve_piped_inputs(st.inputs, completed_steps)
+                st.inputs = resolved_inputs
+                st.status = "running"
+                self._update_step_status(st)
 
-            # Execute step
-            step.status = "running"
-            self._update_step_status(step)
+                try:
+                    logger.info(f"Executing DAG step '{st.step_id}' ('{st.intent}')")
+                    res = await self._execute_single_step(st)
+                    st.status = "done"
+                    st.result = res
+                    self._update_step_status(st)
+                    return st, None
+                except Exception as ex:
+                    err_text = str(ex)
+                    logger.error(f"Step '{st.step_id}' failed: {err_text}")
+                    st.status = "failed"
+                    st.error = err_text
+                    self._update_step_status(st)
+                    return st, err_text
 
-            try:
-                logger.info(f"Executing plan step {idx}: '{step.intent}' (inputs: {step.inputs})")
-                res = await self._execute_single_step(step)
-                step.status = "done"
-                step.result = res
-                self._update_step_status(step)
-                completed_steps.append(step)
-            except Exception as e:
-                err_str = str(e)
-                logger.error(f"Step {idx} ('{step.intent}') failed: {err_str}")
-                step.status = "failed"
-                step.error = err_str
-                self._update_step_status(step)
+            # Execute ready steps in parallel
+            tasks = [_run_single(s) for s in ready_to_run]
+            step_outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
-                # Mark subsequent steps as skipped
-                for skip_idx in range(idx + 1, len(plan.steps)):
-                    skip_step = plan.steps[skip_idx]
-                    skip_step.status = "skipped"
-                    self._update_step_status(skip_step)
+            for outcome in step_outcomes:
+                if isinstance(outcome, tuple):
+                    finished_step, err = outcome
+                    if err:
+                        failed_steps.append(finished_step)
+                        # Mark descendants as skipped
+                        for d_id in _get_all_descendants(finished_step.step_id):
+                            d_step = step_id_map.get(d_id)
+                            if d_step and d_step.status == "pending":
+                                d_step.status = "skipped"
+                                d_step.error = f"Skipped due to failure of upstream step '{finished_step.step_id}'."
+                                self._update_step_status(d_step)
+                    else:
+                        completed_steps[finished_step.step_id] = finished_step
 
-                plan.status = "failed"
-                self._update_plan_status(plan)
+        # Post execution summary
+        total_steps = len(plan.steps)
+        done_count = len(completed_steps)
 
-                # Trigger reverse rollback on failed step
-                rollback_info = await self.rollback_plan(plan, idx)
-                return {
-                    "status": "failure",
-                    "plan_id": plan.id,
-                    "failed_step_index": idx,
-                    "error": err_str,
-                    "rollback": rollback_info,
-                    "route": "planner"
-                }
+        if failed_steps:
+            plan.status = "failed" if done_count == 0 else "partial_failure"
+            self._update_plan_status(plan)
 
-        # All steps completed successfully
+            # Trigger reverse rollback on failed step(s)
+            first_failed = failed_steps[0]
+            first_failed_idx = first_failed.index
+            rollback_info = await self.rollback_plan(plan, first_failed_idx)
+
+            status_name = "partial_failure" if done_count > 0 else "failure"
+            err_msg = first_failed.error or "Step execution failed."
+            return {
+                "status": status_name,
+                "plan_id": plan.id,
+                "failed_step_index": first_failed_idx,
+                "error": err_msg,
+                "response": (
+                    f"Completed {done_count} of {total_steps} steps before failing "
+                    f"at step '{first_failed.intent}': {err_msg}"
+                ),
+                "spoken_summary": (
+                    f"Completed {done_count} steps before encountering a problem at {first_failed.intent}."
+                    if done_count > 0 else f"Workflow failed at {first_failed.intent}."
+                ),
+                "step_badges": [{"step": s.step_id, "intent": s.intent, "status": s.status} for s in plan.steps],
+                "rollback": rollback_info,
+                "route": "planner"
+            }
+
+        # All steps succeeded
         plan.status = "done"
         plan.completed_at = int(time.time())
         self._update_plan_status(plan)
-        logger.info(f"Plan '{plan.id}' completed successfully.")
+        logger.info(f"Plan '{plan.id}' completed successfully with all {done_count} steps.")
 
         return {
             "status": "success",
             "plan_id": plan.id,
-            "response": f"Successfully completed workflow: '{plan.goal}' ({len(completed_steps)}/{len(plan.steps)} steps).",
-            "steps_completed": len(completed_steps),
+            "response": f"Successfully completed workflow: '{plan.goal}' ({done_count}/{total_steps} steps).",
+            "spoken_summary": f"Completed all {done_count} steps for {plan.goal}.",
+            "steps_completed": done_count,
+            "step_badges": [{"step": s.step_id, "intent": s.intent, "status": s.status} for s in plan.steps],
             "route": "planner"
         }
 
@@ -543,8 +699,13 @@ class JarvisPlanner(PlanExecutor, Planner):
                 if action == "delete_file":
                     file_path = r_inputs.get("file_path")
                     if file_path and os.path.exists(file_path):
-                        os.remove(file_path)
-                        logger.info(f"Rollback deleted file: '{file_path}'")
+                        try:
+                            import send2trash
+                            send2trash.send2trash(file_path)
+                            logger.info(f"Rollback moved file to Recycle Bin: '{file_path}'")
+                        except Exception:
+                            os.remove(file_path)
+                            logger.info(f"Rollback deleted file: '{file_path}'")
                         rollbacks_executed.append({"step_index": idx, "action": action, "target": file_path, "status": "success"})
                 elif action == "delete_project":
                     p_id = r_inputs.get("project_id")

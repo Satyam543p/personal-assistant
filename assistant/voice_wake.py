@@ -116,10 +116,11 @@ class WakeWordListener(QObject):
         self._is_recognizing = False
         if self._stop_listening_fn:
             try:
-                self._stop_listening_fn(wait_for_stop=False)
+                self._stop_listening_fn(wait_for_stop=True)
                 self._stop_listening_fn = None
             except Exception:
                 pass
+        time.sleep(0.08)  # Hardware settling yield to allow PortAudio stream release
         logger.info("WakeWordListener: Mic hardware released (paused).")
 
     def resume(self):
@@ -292,12 +293,13 @@ class WakeWordListener(QObject):
             return
         self._last_trigger_time = now
 
-        try:
-            import winsound
-            winsound.Beep(580, 80)
-            winsound.Beep(780, 100)
-        except Exception:
-            pass
+        if os.environ.get("JARVIS_MUTE_SOUNDS") != "1" and os.environ.get("KATE_SILENT_MODE") != "1":
+            try:
+                import winsound
+                winsound.Beep(580, 80)
+                winsound.Beep(780, 100)
+            except Exception:
+                pass
 
         if self.receivers(self.wake_command_detected) > 0:
             self.wake_command_detected.emit(cmd)
@@ -318,12 +320,13 @@ class WakeWordListener(QObject):
             return
         self._last_trigger_time = now
 
-        try:
-            import winsound
-            winsound.Beep(520, 70)
-            winsound.Beep(720, 90)
-        except Exception:
-            pass
+        if os.environ.get("JARVIS_MUTE_SOUNDS") != "1" and os.environ.get("KATE_SILENT_MODE") != "1":
+            try:
+                import winsound
+                winsound.Beep(520, 70)
+                winsound.Beep(720, 90)
+            except Exception:
+                pass
 
         if self.receivers(self.wake_word_detected) > 0:
             self.wake_word_detected.emit()

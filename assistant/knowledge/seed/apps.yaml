@@ -1,0 +1,22 @@
+﻿shortcuts:
+  chrome:
+    command: "chrome"
+    description: "Google Chrome Browser"
+  brave:
+    command: "brave"
+    description: "Brave Browser"
+  code:
+    command: "code"
+    description: "Visual Studio Code"
+  spotify:
+    command: "spotify"
+    description: "Spotify Music Player"
+  notepad:
+    command: "notepad"
+    description: "Windows Notepad"
+  explorer:
+    command: "explorer"
+    description: "Windows File Explorer"
+  calculator:
+    command: "calc"
+    description: "Windows Calculator"

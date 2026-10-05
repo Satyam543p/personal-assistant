@@ -2,15 +2,14 @@ import abc
 import json
 import logging
 import re
-import time
 import urllib.request
 import urllib.error
 try:
     import assistant.config as config
-    from assistant.config import LLAMACPP_URL, OLLAMA_URL, INTERPRETER_TYPE, INTERPRETER_MODEL
+    from assistant.config import LLAMACPP_URL, OLLAMA_URL, INTERPRETER_TYPE
 except ModuleNotFoundError:
     import config
-    from config import LLAMACPP_URL, OLLAMA_URL, INTERPRETER_TYPE, INTERPRETER_MODEL
+    from config import LLAMACPP_URL, OLLAMA_URL, INTERPRETER_TYPE
 
 logger = logging.getLogger("jarvis.interpreter")
 
@@ -21,6 +20,14 @@ except ModuleNotFoundError:
         from context_engine import context_engine
     except Exception:
         context_engine = None
+
+try:
+    from assistant.time_parser import parse_natural_time
+except ModuleNotFoundError:
+    try:
+        from time_parser import parse_natural_time
+    except Exception:
+        parse_natural_time = None
 
 
 # Canonical System Prompt defining the output JSON schema contract
@@ -131,17 +138,28 @@ def split_composite_query(query: str) -> list[str]:
     """
     Decomposes multi-task requests joined by conjunctions into discrete executable actions.
     e.g. 'open brave and open spotify' -> ['open brave', 'open spotify']
+    Carefully preserves URLs, quoted parameters, and single tasks with destination clauses.
     """
     q_clean = query.strip()
-    # Preserved compound idioms (e.g. 'open youtube in brave and play <song>')
+    
+    # 1. Do not split if query contains a URL (prevent breaking query params like &t= or commas)
+    if re.search(r"https?://|www\.", q_clean, re.IGNORECASE):
+        return [q_clean]
+
+    # 2. Preserved compound idioms (e.g. 'open youtube in brave and play <song>')
     if re.search(r"^(?:could\s+you\s+|can\s+you\s+|please\s+)?open\s+(?:brave|chrome|youtube|spotify|edge|firefox)(?:\s+in\s+\w+)?\s+(?:and\s+)?play\s+", q_clean, re.IGNORECASE):
         return [q_clean]
 
-    # Don't split search queries containing conjunctions
+    # 3. Don't split search queries containing conjunctions
     if re.search(r"^(?:search\s+for|google|find|lookup)\s+", q_clean, re.IGNORECASE):
         return [q_clean]
 
-    parts = re.split(r"\b(?:and\s+then|and\s+also|and|then|aur\s+phir|aur|saath\s+me)\b|[,;]\s*", q_clean, flags=re.IGNORECASE)
+    # 4. Don't split single tasks that specify an output destination (e.g. 'save to downloads and keep name')
+    if re.search(r"\b(?:save\s+to|save\s+in|save\s+kar|download\s+karke\s+save)\b", q_clean, re.IGNORECASE) and not re.search(r"\b(?:aur\s+phir|and\s+then)\b", q_clean, re.IGNORECASE):
+        return [q_clean]
+
+    # Split on explicit task conjunctions
+    parts = re.split(r"\b(?:and\s+then|and\s+also|aur\s+phir|aur\s+bhi|and|then|aur)\b|[,;]\s*", q_clean, flags=re.IGNORECASE)
     valid_parts = []
     for p in parts:
         p_strip = p.strip()
@@ -149,7 +167,12 @@ def split_composite_query(query: str) -> list[str]:
             valid_parts.append(p_strip)
 
     if len(valid_parts) >= 2:
-        action_verbs = ("open", "play", "start", "launch", "run", "take", "show", "switch", "lock", "mute", "unmute", "stop", "pause", "kholo", "chalao", "bajao", "dikhao", "capture", "close", "band")
+        action_verbs = (
+            "open", "play", "start", "launch", "run", "take", "show", "switch",
+            "lock", "mute", "unmute", "stop", "pause", "kholo", "chalao", "bajao",
+            "dikhao", "capture", "close", "band", "download", "save", "remind",
+            "summarize", "search", "read", "write", "screenshot", "lo", "le"
+        )
         # Every candidate part must contain an explicit action verb to be an independent task
         action_count = sum(1 for p in valid_parts if any(v in p.lower().split() or p.lower().startswith(v) for v in action_verbs))
         if action_count >= 2 and action_count == len(valid_parts):
@@ -223,6 +246,188 @@ def extract_media_intent(query: str) -> dict | None:
         "browser": browser
     }
 
+
+def parse_smart_web_search(query: str) -> dict | None:
+    """
+    Parses conversational search requests across Hindi, Hinglish, and English.
+    Extracts the clean topic without leaving behind 'karo', browser mentions, or stop words.
+    Examples:
+      - 'brave mein search karo best Hindi anime sites' -> 'best Hindi anime sites'
+      - 'find website that has anime in hindi for free' -> 'website that has anime in hindi for free'
+      - 'find website where i can download movies' -> 'website download movies'
+      - 'google pe search karo latest tech news' -> 'latest tech news'
+    """
+    ql = query.strip().lower()
+
+    # Exclude non-search patterns
+    if any(k in ql for k in ("gana bajao", "song", "remind", "volume", "take screenshot", "open project", "run project")):
+        return None
+
+    # Detect browser preference
+    browser = None
+    if "brave" in ql:
+        browser = "brave"
+    elif "chrome" in ql:
+        browser = "chrome"
+
+    # 1. Hindi/Hinglish: 'brave mein search karo best hindi anime sites'
+    m_hi = re.search(r"(?:(?:brave|chrome|google|browser)\s+(?:mein|me|pe)\s+)?search\s+(?:karo|kijiye|kar\s+do)\s+(.+)", ql)
+    if m_hi:
+        topic = m_hi.group(1).strip()
+        topic = re.sub(r"^(?:karo|kijiye|kripya|please)\s+", "", topic).strip()
+        if len(topic) > 1:
+            return {"query": topic, "browser": browser}
+
+    # 2. Hindi/Hinglish suffix: '<topic> search karo / dhoondo / khojo'
+    m_hi2 = re.search(r"(.+?)\s+(?:search\s+karo|dhoondo|khojo|pata\s+lagao)$", ql)
+    if m_hi2:
+        topic = m_hi2.group(1).strip()
+        topic = re.sub(r"^(?:brave|chrome|google|browser)\s+(?:mein|me|pe)\s+", "", topic).strip()
+        if len(topic) > 1:
+            return {"query": topic, "browser": browser}
+
+    # 3. 'find website that has...', 'find website where...', 'find website to...'
+    m_find_web = re.search(r"\b(?:find|search|look\s+up|suggest)\s+(?:a\s+)?(?:good\s+)?(?:website|site|portal)\s+(?:that\s+has|where\s+i\s+can|to|for)\s+(.+)", ql)
+    if m_find_web:
+        clean_topic = m_find_web.group(1).strip()
+        return {"query": f"website {clean_topic}", "browser": browser}
+
+    # 4. 'find website for downloading movies'
+    m_site = re.search(r"\b(?:website|site)\s+(?:for|to|where)\s+(.+)", ql)
+    if m_site:
+        return {"query": f"website {m_site.group(1).strip()}", "browser": browser}
+
+    # 5. Direct search: 'search for X', 'google X', 'look up X'
+    m_dir = re.search(r"\b(?:search|google|look\s+up)\s+(?:for\s+)?(.+)", ql)
+    if m_dir and not any(k in ql for k in ("codebase", "code", "file", "folder", "project")):
+        raw_topic = m_dir.group(1).strip()
+        raw_topic = re.sub(r"^(?:in|on)\s+(?:brave|chrome|browser)\s+", "", raw_topic).strip()
+        raw_topic = re.sub(r"\s+(?:in|on)\s+(?:brave|chrome|browser)$", "", raw_topic).strip()
+        raw_topic = re.sub(r"\s+karo$", "", raw_topic).strip()
+        if len(raw_topic) > 1:
+            return {"query": raw_topic, "browser": browser}
+
+    # 6. 'find <query>' (e.g. 'find anime in hindi for free', 'find website to download movies')
+    m_find = re.search(r"^find\s+(.+)", ql)
+    if m_find and not any(k in ql for k in ("file", "code", "folder", "project", "my", "me")):
+        topic = m_find.group(1).strip()
+        topic = re.sub(r"^(?:a\s+|an\s+|the\s+)", "", topic).strip()
+        if len(topic) > 2:
+            return {"query": topic, "browser": browser}
+
+    return None
+
+
+def resolve_media_platform(url: str) -> str:
+    """Extracts standardized platform identifier from a URL."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if "music.youtube.com" in host:
+        return "youtube_music"
+    if "youtube.com" in host or "youtu.be" in host:
+        return "youtube_shorts" if "/shorts/" in path else "youtube"
+    if "instagram.com" in host:
+        return "instagram"
+    if "tiktok.com" in host:
+        return "tiktok"
+    if "facebook.com" in host or "fb.watch" in host:
+        return "facebook"
+    if "twitter.com" in host or "x.com" in host:
+        return "twitter"
+    if "vimeo.com" in host:
+        return "vimeo"
+    if "reddit.com" in host or "v.redd.it" in host:
+        return "reddit"
+    return "generic"
+
+
+def parse_guarded_download_request(query: str, context: dict = None) -> dict | None:
+    """
+    Evaluates query for guarded media download intent.
+    Requires:
+    1. An explicit HTTP/HTTPS URL, OR
+    2. An explicit media keyword (video, reel, song, audio, playlist, short, mp3, mp4, gaana, clip)
+       combined with download/save phrasing, OR
+    3. Anaphora referencing context.last_url (e.g. 'isko download kar', 'ye download karo').
+    """
+    q_clean = query.strip()
+    q_lower = q_clean.lower()
+    url_m = re.search(r"https?://[^\s]+", q_clean)
+    url = url_m.group(0).rstrip(".,;!?\"'") if url_m else None
+
+    has_anaphora = bool(re.search(r"\b(isko|ise|ye|yeh|this|it)\b", q_lower))
+    if not url and has_anaphora:
+        last_url = (context or {}).get("last_url")
+        if not last_url and context_engine and hasattr(context_engine, "active_entities"):
+            last_url = context_engine.active_entities.get("last_url")
+        if last_url:
+            url = last_url
+
+    has_download_action = bool(re.search(
+        r"\b(download|save|nikalo|get|extract|rip)\b|(?:download\s+kar|download\s+karo|save\s+karo|save\s+kar)",
+        q_lower
+    ))
+
+    media_keywords = {
+        "video": "download_video",
+        "clip": "download_video",
+        "reel": "download_video",
+        "short": "download_video",
+        "mp4": "download_video",
+        "audio": "extract_audio",
+        "song": "download_song",
+        "gaana": "download_song",
+        "gana": "download_song",
+        "mp3": "extract_audio",
+        "playlist": "inspect_playlist",
+        "subtitles": "extract_subtitles",
+        "transcript": "extract_subtitles"
+    }
+
+    matched_type = None
+    for kw, intent_name in media_keywords.items():
+        if re.search(rf"\b{kw}\b", q_lower):
+            matched_type = (kw, intent_name)
+            break
+
+    if not url and not matched_type:
+        return None
+    if not has_download_action and not url:
+        return None
+
+    intent = matched_type[1] if matched_type else "download_video"
+    if re.search(r"\b(mp3|audio|sound)\b", q_lower) and intent == "download_video":
+        intent = "extract_audio"
+
+    source = url
+    if not source:
+        title = q_clean
+        for p in [
+            r"\b(download|save|nikalo|karo|kar|do|chahiye|please)\b",
+            r"\b(video|reel|song|gaana|gana|audio|mp3|mp4|short)\b",
+            r"\b(from|of|for|ka|ki|ke|pe|on)\s+(?:youtube|instagram|spotify)?\b",
+            r"\b(isko|ise|ye|yeh|this|it)\b"
+        ]:
+            title = re.sub(p, "", title, flags=re.IGNORECASE)
+        source = re.sub(r"\s+", " ", title).strip()
+        if not source or len(source) < 2 or source.lower() in ("media", "none", "video", "song"):
+            return None
+
+    platform = resolve_media_platform(source) if url else "search"
+    entities = {
+        "source": source,
+        "url": source if url else None,
+        "platform": platform
+    }
+    if intent == "download_song":
+        entities["title"] = source
+        entities["song_title"] = source
+
+    return {"intent": intent, "entities": entities, "platform": platform}
+
+
 class RuleBasedInterpreter(LocalInterpreter):
     def __init__(self):
         self.provider_name = "rule_based"
@@ -248,7 +453,145 @@ class RuleBasedInterpreter(LocalInterpreter):
                 "confidence": 0.98,
                 "suggested_route": "tool",
                 "needs_clarification": False
-            }, "rule_based", f"Multi-task query decomposed into {len(sub_tasks)} tasks")
+            }, "rule_based", f"Detected {len(sub_tasks)} composite tasks")
+
+        # ── 1b. Guarded Media Download NLU ──
+        download_info = parse_guarded_download_request(query_clean, context)
+        if download_info:
+            return normalize_interpretation({
+                "intent": download_info["intent"],
+                "entities": download_info["entities"],
+                "resolved_reference": download_info["entities"].get("source") or download_info["entities"].get("url") or "",
+                "confidence": 0.98,
+                "suggested_route": "tool",
+                "needs_clarification": False
+            }, "rule_based", f"Guarded download intent for {download_info.get('platform', 'media')}")
+
+        # ── 1c. Smart Reminders & Natural Time Parsing (Asia/Kolkata) ──
+        if parse_natural_time and not any(k in query_lower for k in ("send notification", "desktop alert", "push notification", "toast notification")):
+            if re.search(r"\b(reminder|remind|yaad dilana|yaad dila dena|yaad dilao|alarm)\b", query_lower):
+                parsed_time = parse_natural_time(query_clean)
+                if parsed_time:
+                    return normalize_interpretation({
+                        "intent": "create_reminder",
+                        "entities": {
+                            "time_ist": parsed_time.dt_ist.isoformat(),
+                            "time_utc": parsed_time.dt_utc.isoformat(),
+                            "spoken_time": parsed_time.spoken_time,
+                            "reminder_text": parsed_time.reminder_text,
+                            "is_tomorrow": parsed_time.is_tomorrow
+                        },
+                        "resolved_reference": parsed_time.spoken_time,
+                        "confidence": 0.98,
+                        "suggested_route": "tool",
+                        "needs_clarification": False
+                    }, "rule_based", f"Parsed reminder for {parsed_time.spoken_time}")
+                elif re.search(r"\b(cancel|delete|hatao|rok|ruko)\b", query_lower):
+                    return normalize_interpretation({
+                        "intent": "cancel_reminder",
+                        "entities": {"query": query_clean},
+                        "confidence": 0.95,
+                        "suggested_route": "tool",
+                        "needs_clarification": False
+                    }, "rule_based", "Cancel reminder intent")
+                elif re.search(r"\b(list|show|dikhao|batao|check)\b", query_lower):
+                    return normalize_interpretation({
+                        "intent": "list_reminders",
+                        "entities": {},
+                        "confidence": 0.95,
+                        "suggested_route": "tool",
+                        "needs_clarification": False
+                    }, "rule_based", "List reminders intent")
+
+        # ── 1d. Smart Web Search (Hindi, Hinglish & Natural Language) ──
+        search_info = parse_smart_web_search(query_clean)
+        if search_info:
+            return normalize_interpretation({
+                "intent": "search_web",
+                "entities": {
+                    "topic": search_info["query"],
+                    "query": search_info["query"],
+                    "browser": search_info.get("browser")
+                },
+                "resolved_reference": search_info["query"],
+                "confidence": 0.98,
+                "suggested_route": "tool",
+                "needs_clarification": False
+            }, "rule_based", f"Smart web search for '{search_info['query']}'")
+
+        # ── 1d. Safe Undo Action Intent ──
+        if re.search(r"^(?:undo|undo karo|undo last action|undo that|pichla action wapas lo|wapas lo|revert|undo download|undo commit)$", query_lower) or re.search(r"\b(undo last action|undo last|undo download|undo commit|undo karo)\b", query_lower):
+            return normalize_interpretation({
+                "intent": "undo_action",
+                "entities": {"query": query_clean},
+                "confidence": 0.98,
+                "suggested_route": "tool",
+                "needs_clarification": False
+            }, "rule_based", "Safe undo action intent")
+
+        # ── 1e. Cancel Download Intent ──
+        if re.search(r"^(?:cancel download|download cancel karo|download roko|stop download)$", query_lower):
+            return normalize_interpretation({
+                "intent": "cancel_download",
+                "entities": {},
+                "confidence": 0.98,
+                "suggested_route": "tool",
+                "needs_clarification": False
+            }, "rule_based", "Cancel download intent")
+
+        # ── 1f. Remember Fact Intent ──
+        m_rem = re.search(
+            r"^(?:remember that|remember|yaad rakh(?:na)?(?:\s+ki)?)\s+(.+)$",
+            query_lower
+        )
+        if m_rem:
+            raw_fact = m_rem.group(1).strip()
+            # Try to split into key/value if contains 'is', 'hai', ':', '='
+            m_kv = re.search(r"^(?:mera|meri|my)?\s*(.+?)\s+(?:is|hai|=|:)\s+(.+)$", raw_fact)
+            if m_kv:
+                fact_key = m_kv.group(1).strip()
+                fact_val = m_kv.group(2).strip()
+            else:
+                fact_key = raw_fact.split()[0] if raw_fact.split() else "note"
+                fact_val = raw_fact
+            return normalize_interpretation({
+                "intent": "store_memory",
+                "entities": {"key": fact_key, "content": fact_val, "category": "preference"},
+                "confidence": 0.96,
+                "suggested_route": "tool",
+                "needs_clarification": False
+            }, "rule_based", "Store memory intent")
+
+        # ── 1g. Forget Fact Intent ──
+        m_forg = re.search(
+            r"^(?:forget that|forget|bhool jao|hata do yaad se)\s+(.+)$",
+            query_lower
+        ) or re.search(r"^(.+?)\s+(?:bhool jao|yaad mat rakhna)$", query_lower)
+        if m_forg:
+            target = m_forg.group(1).strip()
+            return normalize_interpretation({
+                "intent": "forget_fact",
+                "entities": {"query": target},
+                "confidence": 0.96,
+                "suggested_route": "tool",
+                "needs_clarification": False
+            }, "rule_based", "Forget fact intent")
+
+        # ── 1h. Query Knowledge Intent ──
+        qk_pattern = (
+            r"^(?:what do you know about me|who am i|batao mere bare me|"
+            r"mere bare me kya jante ho|what do you know about)\b"
+        )
+        if re.search(qk_pattern, query_lower):
+            m_q = re.search(r"(?:about|bare me)\s+(.+)$", query_lower)
+            q_target = m_q.group(1).strip() if m_q else "profile"
+            return normalize_interpretation({
+                "intent": "query_knowledge",
+                "entities": {"query": q_target},
+                "confidence": 0.95,
+                "suggested_route": "tool",
+                "needs_clarification": False
+            }, "rule_based", "Query knowledge intent")
 
         # ── 2. Semantic Media & Music Intent (Dynamic Platform + YouTube Default) ──
         media_info = extract_media_intent(query_clean)
@@ -262,6 +605,18 @@ class RuleBasedInterpreter(LocalInterpreter):
                 "needs_clarification": False
             }, "rule_based", f"Semantic music intent: {media_info['title']} on {media_info['platform']}")
 
+        # ── 2b. Smart Web & Browser Search Intent ──
+        web_search_info = parse_smart_web_search(query_clean)
+        if web_search_info:
+            return normalize_interpretation({
+                "intent": "web_search_browser",
+                "entities": web_search_info,
+                "resolved_reference": web_search_info["query"],
+                "confidence": 0.98,
+                "suggested_route": "tool",
+                "needs_clarification": False
+            }, "rule_based", f"Smart web search intent: {web_search_info['query']}")
+
         # Default starting dictionary
         data = {
             "intent": "conversation",
@@ -272,8 +627,10 @@ class RuleBasedInterpreter(LocalInterpreter):
             "suggested_route": "local_model"
         }
 
-        # Match conversation/greetings/capabilities (with word boundaries to avoid matching "hi" in "internship")
-        if re.search(r"\b(hi|hello|hey|yo|greetings|who are you|what can you do|what things you can do|capabilities|capability|features|what do you do|help me|how can you help|introduce yourself|tell me about yourself)\b", query_lower):
+        # Match conversation/greetings/capabilities (strictly start of query or with assistant name to avoid Hindi 'tum hi ho')
+        if (re.search(r"^(?:hi|hello|hey|yo|greetings)\b", query_lower) or
+            re.search(r"\b(?:hi|hello|hey|yo)\s+(?:kate|jarvis)\b", query_lower) or
+            re.search(r"\b(?:who are you|what can you do|what things you can do|capabilities|capability|features|what do you do|help me|how can you help|introduce yourself|tell me about yourself)\b", query_lower)):
             data["intent"] = "conversation"
             data["confidence"] = 0.95
             data["suggested_route"] = "local_model"
@@ -358,6 +715,8 @@ class RuleBasedInterpreter(LocalInterpreter):
               not re.search(r"\b(dry[\s\-]run|prune|job|scheduled|background\s+job)\b", query_lower)):
             run_match = re.search(r"\b(run|start server|exec|execute|launch)\s+([a-zA-Z0-9_\-\s]+)", query_lower)
             proj = run_match.group(2).strip() if run_match else "unknown"
+            if proj.startswith("project "):
+                proj = proj[len("project "):].strip()
             data["intent"] = "run_project"
             data["entities"]["project_name"] = proj
             data["confidence"] = 0.9
@@ -450,9 +809,17 @@ class RuleBasedInterpreter(LocalInterpreter):
                         target = target.replace(hi_name, en_name)
                 # Strip trailing filler phrases
                 target = re.sub(r"\s+(?:in|on)\s+(?:brave|chrome|browser)$", "", target, flags=re.IGNORECASE).strip()
+                try:
+                    from assistant.launchers import app_launcher
+                    resolved_app = app_launcher.resolver.resolve(target)
+                    if resolved_app:
+                        target = resolved_app.name
+                except Exception:
+                    pass
                 data["intent"] = "open_app"
                 data["entities"]["app_name"] = target
-                data["confidence"] = 0.95
+                data["resolved_reference"] = target
+                data["confidence"] = 0.98
                 data["suggested_route"] = "tool"
 
         # Match finish video / study session
@@ -734,7 +1101,7 @@ class RuleBasedInterpreter(LocalInterpreter):
             data["suggested_route"] = "tool"
 
         # Match tune recommendation weights
-        elif re.search(r"\b(tune recommendation weights|tune weights|update recommendation weights|retune weights)\b", query_lower):
+        elif re.search(r"\b(tune recommendation weights|tune weights|update recommendation weights|retune weights|prioritize learning|prioritize goals|focus on projects|focus on goals)\b", query_lower):
             data["intent"] = "tune_recommendation_weights"
             data["confidence"] = 0.95
             data["suggested_route"] = "tool"
@@ -791,8 +1158,8 @@ class RuleBasedInterpreter(LocalInterpreter):
 
 
         # Match explicit store memory
-        elif re.search(r"\b(remember that|store memory|save memory|save note)\b", query_lower):
-            mem_match = re.search(r"\b(?:remember that|store memory|save memory|save note)\s+(.+)", query, re.IGNORECASE)
+        elif re.search(r"\b(remember that|store memory|save memory|save note|note down that|note down|yaad rakhna|yaad rakh)\b", query_lower):
+            mem_match = re.search(r"\b(?:remember that|store memory|save memory|save note|note down that|note down|yaad rakhna|yaad rakh)\s+(.+)", query, re.IGNORECASE)
             content = mem_match.group(1).strip() if mem_match else query
             data["intent"] = "store_memory"
             data["entities"]["content"] = content
@@ -815,7 +1182,7 @@ class RuleBasedInterpreter(LocalInterpreter):
             data["suggested_route"] = "memory"
 
         # Match memory / goals queries
-        elif re.search(r"\b(remember|recall|memory|retrieve|what is my|what are my|what did i|do you remember|preferences)\b", query_lower):
+        elif re.search(r"\b(remember|recall|memory|retrieve|what is my|what are my|what was my|what did i|do you remember|preferences)\b", query_lower):
             data["intent"] = "memory_query"
             data["entities"]["topic"] = query
             data["confidence"] = 0.85
@@ -951,7 +1318,7 @@ class RuleBasedInterpreter(LocalInterpreter):
             data["entities"]["message"] = c_msg
 
         # Match git status
-        elif any(k in query_lower for k in ("git status", "check git", "branch status", "uncommitted changes", "is git dirty")):
+        elif any(k in query_lower for k in ("git status", "check git", "branch status", "uncommitted changes", "uncommitted files", "uncommitted", "git changes", "is git dirty")):
             data["intent"] = "git_status"
             data["confidence"] = 0.95
             data["suggested_route"] = "tool"
@@ -1076,7 +1443,7 @@ class LlamaCppInterpreter(LocalInterpreter):
                     resp_data = json.loads(response.read().decode("utf-8"))
                     content_str = resp_data["content"]
                     data = json.loads(content_str)
-                    return normalize_interpretation(data, self.provider_name, f"Processed by llama.cpp direct completion.")
+                    return normalize_interpretation(data, self.provider_name, "Processed by llama.cpp direct completion.")
         except Exception as e:
             logger.error(f"llama.cpp direct completion API call failed: {e}")
             

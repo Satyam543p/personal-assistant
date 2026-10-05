@@ -69,7 +69,8 @@ try:
         GetMediaInfoTool,
         DownloadVideoTool,
         ConvertMediaTool,
-        InspectPlaylistTool
+        InspectPlaylistTool,
+        CancelDownloadTool
     )
     from assistant.voice import (
         JarvisVoiceSubsystem,
@@ -96,13 +97,25 @@ try:
         ScheduleJobTool,
         RunScheduledJobNowTool,
         GetProactiveBriefingTool,
-        ToggleJobStatusTool
+        ToggleJobStatusTool,
+        CreateReminderTool,
+        ListRemindersTool,
+        CancelReminderTool
     )
     from assistant.telemetry import WindowsSystemTelemetry, GetSystemTelemetryTool
     from assistant.notifications import WindowsNotificationService, SendNotificationTool
     from assistant.git_tools import LocalGitService, GitStatusTool, GitDiffTool, GitCommitTool
     from assistant.indexer import LocalCodebaseIndexer, IndexCodebaseTool, SearchCodebaseTool
     from assistant.file_safety import LocalQuarantineManager, DeleteFileTool, RestoreQuarantinedFileTool
+    from assistant.undo_manager import UndoManager, UndoActionTool
+    from assistant.knowledge_engine import (
+        KnowledgeEngine, RememberFactTool, QueryKnowledgeTool, ForgetFactTool
+    )
+    from assistant.document_tools import ReadPdfTool, SendEmailTool
+    from assistant.desktop_tools import (
+        TakeScreenshotTool, ControlVolumeTool, ShowDesktopTool,
+        SwitchWindowTool, CloseWindowTool, PlayMusicTool, WebSearchBrowserTool
+    )
     import assistant.config as config_module
 except ModuleNotFoundError:
     from config import HOST, PORT, IDLE_UNLOAD_TIMEOUT, LOG_PATH
@@ -167,7 +180,8 @@ except ModuleNotFoundError:
         GetMediaInfoTool,
         DownloadVideoTool,
         ConvertMediaTool,
-        InspectPlaylistTool
+        InspectPlaylistTool,
+        CancelDownloadTool
     )
     from voice import (
         JarvisVoiceSubsystem,
@@ -194,13 +208,21 @@ except ModuleNotFoundError:
         ScheduleJobTool,
         RunScheduledJobNowTool,
         GetProactiveBriefingTool,
-        ToggleJobStatusTool
+        ToggleJobStatusTool,
+        CreateReminderTool,
+        ListRemindersTool,
+        CancelReminderTool
     )
     from telemetry import WindowsSystemTelemetry, GetSystemTelemetryTool
     from notifications import WindowsNotificationService, SendNotificationTool
     from git_tools import LocalGitService, GitStatusTool, GitDiffTool, GitCommitTool
     from indexer import LocalCodebaseIndexer, IndexCodebaseTool, SearchCodebaseTool
     from file_safety import LocalQuarantineManager, DeleteFileTool, RestoreQuarantinedFileTool
+    from undo_manager import UndoManager, UndoActionTool
+    from knowledge_engine import (
+        KnowledgeEngine, RememberFactTool, QueryKnowledgeTool, ForgetFactTool
+    )
+    from document_tools import ReadPdfTool, SendEmailTool
     import config as config_module
 
 # Configure logging to console and file
@@ -315,10 +337,27 @@ class JarvisDaemon(IPCHandler):
         self.timer_manager = IdleTimerManager(default_timeout=IDLE_UNLOAD_TIMEOUT)
         self.db = DatabaseManager()
         try:
-            from assistant.context_engine import context_engine
-            context_engine.attach_db(self.db)
+            from assistant.safety import install_secret_redaction_filters
+            install_secret_redaction_filters()
         except Exception as e:
-            logger.debug(f"Failed attaching DB to context_engine: {e}")
+            logger.warning(f"Could not install secret redaction filters: {e}")
+        global context_engine
+        if context_engine is None:
+            try:
+                from assistant.context_engine import context_engine as _ce
+                context_engine = _ce
+            except ModuleNotFoundError:
+                try:
+                    from context_engine import context_engine as _ce
+                    context_engine = _ce
+                except Exception:
+                    context_engine = None
+        if context_engine:
+            try:
+                context_engine.attach_db(self.db)
+                logger.info("DatabaseManager successfully attached to context_engine singleton.")
+            except Exception as e:
+                logger.warning(f"Failed attaching DB to context_engine: {e}")
         self.interpreter = get_interpreter()
         self.ipc_server = None
         self.is_running = False
@@ -461,12 +500,14 @@ class JarvisDaemon(IPCHandler):
         self.get_media_info_tool = GetMediaInfoTool(self.media_extractor)
         self.convert_media_tool = ConvertMediaTool(self.media_extractor)
         self.inspect_playlist_tool = InspectPlaylistTool(self.media_extractor)
+        self.cancel_download_tool = CancelDownloadTool(self.media_extractor)
         self.tool_executor.register_tool(self.download_video_tool)
         self.tool_executor.register_tool(self.extract_audio_tool)
         self.tool_executor.register_tool(self.extract_subtitles_tool)
         self.tool_executor.register_tool(self.get_media_info_tool)
         self.tool_executor.register_tool(self.convert_media_tool)
         self.tool_executor.register_tool(self.inspect_playlist_tool)
+        self.tool_executor.register_tool(self.cancel_download_tool)
 
         # Voice Input/Output Subsystem (Section 48 / Milestone 19)
         self.voice_subsystem = JarvisVoiceSubsystem(
@@ -511,16 +552,23 @@ class JarvisDaemon(IPCHandler):
         self.run_scheduled_job_tool = RunScheduledJobNowTool(self.scheduler)
         self.get_proactive_briefing_tool = GetProactiveBriefingTool(self.proactive_engine)
         self.toggle_job_status_tool = ToggleJobStatusTool(self.scheduler)
+        self.create_reminder_tool = CreateReminderTool(self.scheduler)
+        self.list_reminders_tool = ListRemindersTool(self.scheduler)
+        self.cancel_reminder_tool = CancelReminderTool(self.scheduler)
 
         self.tool_executor.register_tool(self.list_scheduled_jobs_tool)
         self.tool_executor.register_tool(self.schedule_job_tool)
         self.tool_executor.register_tool(self.run_scheduled_job_tool)
         self.tool_executor.register_tool(self.get_proactive_briefing_tool)
         self.tool_executor.register_tool(self.toggle_job_status_tool)
+        self.tool_executor.register_tool(self.create_reminder_tool)
+        self.tool_executor.register_tool(self.list_reminders_tool)
+        self.tool_executor.register_tool(self.cancel_reminder_tool)
 
         # Pre-UI Hardening Subsystems
         self.telemetry = WindowsSystemTelemetry()
         self.notifications = WindowsNotificationService()
+        self.scheduler.notifications = self.notifications
         self.git_service = LocalGitService()
         self.codebase_indexer = LocalCodebaseIndexer(self.db, embedding_manager=getattr(self.memory_manager, 'embedding_manager', None))
         self.quarantine_manager = LocalQuarantineManager()
@@ -534,6 +582,12 @@ class JarvisDaemon(IPCHandler):
         self.search_codebase_tool = SearchCodebaseTool(self.codebase_indexer)
         self.delete_file_tool = DeleteFileTool(self.quarantine_manager)
         self.restore_quarantined_file_tool = RestoreQuarantinedFileTool(self.quarantine_manager)
+        self.undo_manager = UndoManager(quarantine_mgr=self.quarantine_manager)
+        self.undo_action_tool = UndoActionTool(self.undo_manager)
+
+        # Wire undo_manager to download_manager
+        if hasattr(self.media_extractor, "download_manager"):
+            self.media_extractor.download_manager.undo_manager = self.undo_manager
 
         self.tool_executor.codebase_indexer = self.codebase_indexer
         self.tool_executor.register_tool(self.get_system_telemetry_tool)
@@ -545,6 +599,42 @@ class JarvisDaemon(IPCHandler):
         self.tool_executor.register_tool(self.search_codebase_tool)
         self.tool_executor.register_tool(self.delete_file_tool)
         self.tool_executor.register_tool(self.restore_quarantined_file_tool)
+        self.tool_executor.register_tool(self.undo_action_tool)
+
+        # Knowledge Engine & Memory Learning
+        self.knowledge_engine = KnowledgeEngine(self.db)
+        self.remember_fact_tool = RememberFactTool(self.knowledge_engine)
+        self.query_knowledge_tool = QueryKnowledgeTool(self.knowledge_engine)
+        self.forget_fact_tool = ForgetFactTool(self.knowledge_engine)
+        self.tool_executor.register_tool(self.remember_fact_tool)
+        self.tool_executor.register_tool(self.query_knowledge_tool)
+        self.tool_executor.register_tool(self.forget_fact_tool)
+
+        # Document tools
+        self.read_pdf_tool = ReadPdfTool()
+        self.send_email_tool = SendEmailTool()
+        self.tool_executor.register_tool(self.read_pdf_tool)
+        self.tool_executor.register_tool(self.send_email_tool)
+
+        # Desktop suite tools
+        try:
+            self.screenshot_tool = TakeScreenshotTool()
+            self.volume_tool = ControlVolumeTool()
+            self.show_desktop_tool = ShowDesktopTool()
+            self.switch_window_tool = SwitchWindowTool()
+            self.close_window_tool = CloseWindowTool()
+            self.play_music_tool = PlayMusicTool()
+            self.web_search_browser_tool = WebSearchBrowserTool()
+
+            self.tool_executor.register_tool(self.screenshot_tool)
+            self.tool_executor.register_tool(self.volume_tool)
+            self.tool_executor.register_tool(self.show_desktop_tool)
+            self.tool_executor.register_tool(self.switch_window_tool)
+            self.tool_executor.register_tool(self.close_window_tool)
+            self.tool_executor.register_tool(self.play_music_tool)
+            self.tool_executor.register_tool(self.web_search_browser_tool)
+        except Exception as e:
+            logger.warning(f"Non-critical: could not register all desktop suite tools: {e}")
 
 
         # Wire dependencies to Router
@@ -742,12 +832,14 @@ class JarvisDaemon(IPCHandler):
         except Exception:
             pass
 
+        final_text = str(route_result.get("response") or route_result.get("message") or "").strip()
         res_payload = {
             "status": route_result.get("status", "success"),
             "interpretation": interpretation,
             "latency_ms": latency_ms,
             "provider": provider,
-            "response": route_result.get("response", ""),
+            "response": final_text,
+            "message": final_text,
             "route": route_result.get("route", "")
         }
         for k, v in route_result.items():

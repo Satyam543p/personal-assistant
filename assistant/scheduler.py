@@ -15,15 +15,13 @@ import os
 import shutil
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 try:
-    from assistant.config import WORKSPACE_ROOT, DATABASE_PATH
-    from assistant.tools import Tool
+    from assistant.tools import Tool, ToolResult, ErrorCode
 except ModuleNotFoundError:
-    from config import WORKSPACE_ROOT, DATABASE_PATH
-    from tools import Tool
+    from tools import Tool, ToolResult, ErrorCode
 
 logger = logging.getLogger("jarvis.scheduler")
 
@@ -203,14 +201,144 @@ class JarvisBackgroundScheduler(BackgroundScheduler):
     preventing concurrent overlaps, and recording audit logs to SQLite.
     """
 
-    def __init__(self, db_manager, tick_interval_seconds: float = 1.0):
+    def __init__(
+        self,
+        db_manager,
+        tick_interval_seconds: float = 1.0,
+        notifications=None,
+        on_reminder_triggered: Optional[Callable[[dict], Any]] = None
+    ):
         self.db = db_manager
         self.tick_interval_seconds = tick_interval_seconds
+        self.notifications = notifications
+        self.on_reminder_triggered = on_reminder_triggered
         self._jobs: Dict[str, ScheduledJob] = {}
         self._running_jobs: set[str] = set()
         self._is_running: bool = False
         self._loop_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+        self._ensure_reminders_table()
+
+    def _ensure_reminders_table(self):
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id TEXT PRIMARY KEY,
+                    reminder_text TEXT NOT NULL,
+                    trigger_time_utc TEXT NOT NULL,
+                    trigger_time_ist TEXT,
+                    spoken_time TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    triggered_at TEXT
+                );
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reminders_active_due ON reminders(is_active, trigger_time_utc);"
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error ensuring reminders table exists: {e}")
+
+    def create_reminder(
+        self,
+        reminder_text: str,
+        trigger_time_utc: str,
+        trigger_time_ist: Optional[str] = None,
+        spoken_time: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Creates and stores a persistent reminder in SQLite."""
+        reminder_id = f"rem_{uuid.uuid4().hex[:8]}"
+        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn = self.db.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO reminders (id, reminder_text, trigger_time_utc, trigger_time_ist, spoken_time, is_active, created_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+                """,
+                (reminder_id, reminder_text, trigger_time_utc, trigger_time_ist, spoken_time, created_at)
+            )
+            conn.commit()
+            logger.info(f"Created persistent reminder {reminder_id}: '{reminder_text}' at {spoken_time or trigger_time_utc}")
+            return {
+                "id": reminder_id,
+                "reminder_text": reminder_text,
+                "trigger_time_utc": trigger_time_utc,
+                "trigger_time_ist": trigger_time_ist,
+                "spoken_time": spoken_time,
+                "is_active": True
+            }
+        finally:
+            conn.close()
+
+    def list_reminders(self, active_only: bool = True) -> List[Dict[str, Any]]:
+        """Lists stored reminders."""
+        conn = self.db.get_connection()
+        try:
+            cursor = conn.cursor()
+            if active_only:
+                cursor.execute(
+                    "SELECT * FROM reminders WHERE is_active = 1 ORDER BY trigger_time_utc ASC"
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM reminders ORDER BY created_at DESC"
+                )
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def cancel_reminder(self, reminder_id: Optional[str] = None, query: Optional[str] = None) -> bool:
+        """Cancels a reminder by ID or matching text."""
+        conn = self.db.get_connection()
+        try:
+            cursor = conn.cursor()
+            if reminder_id:
+                cursor.execute(
+                    "UPDATE reminders SET is_active = 0 WHERE id = ?",
+                    (reminder_id,)
+                )
+            elif query:
+                cursor.execute(
+                    "UPDATE reminders SET is_active = 0 WHERE is_active = 1 AND reminder_text LIKE ?",
+                    (f"%{query}%",)
+                )
+            else:
+                return False
+            changes = conn.total_changes
+            conn.commit()
+            return changes > 0
+        finally:
+            conn.close()
+
+    async def _trigger_reminder(self, reminder: Dict[str, Any]):
+        """Dispatches notification and audio alert when reminder is due."""
+        text = reminder.get("reminder_text", "Reminder!")
+        logger.info(f"⏰ REMINDER DUE: {text}")
+        if self.notifications:
+            try:
+                if asyncio.iscoroutinefunction(self.notifications.send_notification):
+                    await self.notifications.send_notification(title="Jarvis Reminder", message=text)
+                else:
+                    self.notifications.send_notification(title="Jarvis Reminder", message=text)
+            except Exception as e:
+                logger.warning(f"Failed to display toast notification for reminder: {e}")
+
+        if self.on_reminder_triggered:
+            try:
+                res = self.on_reminder_triggered(reminder)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as e:
+                logger.warning(f"Error in on_reminder_triggered callback: {e}")
 
     @property
     def is_running(self) -> bool:
@@ -537,6 +665,37 @@ class JarvisBackgroundScheduler(BackgroundScheduler):
                 # Fire as background task without blocking the loop
                 asyncio.create_task(self._execute_job(job))
 
+        # Check due reminders in the exact same scheduler tick!
+        now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        due_reminders = []
+        conn = self.db.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, reminder_text, trigger_time_utc, trigger_time_ist, spoken_time
+                FROM reminders
+                WHERE is_active = 1 AND trigger_time_utc <= ?
+                ORDER BY trigger_time_utc ASC
+                """,
+                (now_utc,)
+            )
+            rows = cursor.fetchall()
+            due_reminders = [dict(r) for r in rows]
+            for r in due_reminders:
+                cursor.execute(
+                    "UPDATE reminders SET is_active = 0, triggered_at = ? WHERE id = ?",
+                    (now_utc, r["id"])
+                )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error querying due reminders: {e}")
+        finally:
+            conn.close()
+
+        for r in due_reminders:
+            asyncio.create_task(self._trigger_reminder(r))
+
     def list_jobs(self) -> List[Dict[str, Any]]:
         conn = self.db.get_connection()
         try:
@@ -619,7 +778,7 @@ class JarvisProactiveEngine(ProactiveEngine):
         """
         now = datetime.datetime.now()
         date_str = now.strftime("%A, %B %d, %Y")
-        
+
         # 1. Fetch current focus
         focus_project = "General Workspace"
         conn = self.db.get_connection()
@@ -1255,3 +1414,128 @@ class ToggleJobStatusTool(Tool):
             return {"status": "success" if ok else "failure", "response": msg}
         else:
             return {"status": "failure", "response": f"Unknown action '{action}'. Use 'pause' or 'resume'."}
+
+
+class CreateReminderTool(Tool):
+    def __init__(self, scheduler: JarvisBackgroundScheduler):
+        declaration = {
+            "inputs": {
+                "type": "object",
+                "properties": {
+                    "reminder_text": {"type": "string"},
+                    "time_utc": {"type": "string"},
+                    "time_ist": {"type": "string"},
+                    "spoken_time": {"type": "string"}
+                },
+                "required": ["reminder_text"]
+            },
+            "side_effects": "Schedules persistent reminder",
+            "timeout_ms": 5000,
+            "memory_limit_mb": 50
+        }
+        super().__init__("create_reminder", "reversible", declaration)
+        self.scheduler = scheduler
+
+    async def execute(self, executor=None, **kwargs) -> dict:
+        text = kwargs.get("reminder_text") or kwargs.get("text") or kwargs.get("message")
+        if not text:
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.EXECUTION_FAILED,
+                message="Missing reminder text.",
+                status="failure"
+            ).to_dict()
+        time_utc = kwargs.get("time_utc") or kwargs.get("time")
+        time_ist = kwargs.get("time_ist")
+        spoken = kwargs.get("spoken_time") or time_utc or "scheduled time"
+
+        if not time_utc:
+            now_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+            time_utc = now_dt.isoformat()
+
+        res = self.scheduler.create_reminder(
+            reminder_text=text,
+            trigger_time_utc=time_utc,
+            trigger_time_ist=time_ist,
+            spoken_time=spoken
+        )
+        return ToolResult(
+            ok=True,
+            data=res,
+            message=f"Reminder set for {spoken}: {text}",
+            status="success"
+        ).to_dict()
+
+
+class ListRemindersTool(Tool):
+    def __init__(self, scheduler: JarvisBackgroundScheduler):
+        declaration = {
+            "inputs": {
+                "type": "object",
+                "properties": {
+                    "active_only": {"type": "boolean", "default": True}
+                }
+            },
+            "side_effects": "none",
+            "timeout_ms": 5000,
+            "memory_limit_mb": 50
+        }
+        super().__init__("list_reminders", "read_only", declaration)
+        self.scheduler = scheduler
+
+    async def execute(self, executor=None, **kwargs) -> dict:
+        active_only = kwargs.get("active_only", True)
+        reminders = self.scheduler.list_reminders(active_only=active_only)
+        if not reminders:
+            return ToolResult(
+                ok=True,
+                data={"reminders": []},
+                message="You have no active reminders.",
+                status="success"
+            ).to_dict()
+
+        summary_lines = [
+            f"• {r.get('spoken_time') or r.get('trigger_time_utc')}: {r['reminder_text']}"
+            for r in reminders
+        ]
+        return ToolResult(
+            ok=True,
+            data={"reminders": reminders, "count": len(reminders)},
+            message=f"You have {len(reminders)} active reminder(s):\n" + "\n".join(summary_lines),
+            status="success"
+        ).to_dict()
+
+
+class CancelReminderTool(Tool):
+    def __init__(self, scheduler: JarvisBackgroundScheduler):
+        declaration = {
+            "inputs": {
+                "type": "object",
+                "properties": {
+                    "reminder_id": {"type": "string"},
+                    "query": {"type": "string"}
+                }
+            },
+            "side_effects": "none",
+            "timeout_ms": 5000,
+            "memory_limit_mb": 50
+        }
+        super().__init__("cancel_reminder", "reversible", declaration)
+        self.scheduler = scheduler
+
+    async def execute(self, executor=None, **kwargs) -> dict:
+        reminder_id = kwargs.get("reminder_id")
+        query = kwargs.get("query")
+        success = self.scheduler.cancel_reminder(reminder_id=reminder_id, query=query)
+        if success:
+            return ToolResult(
+                ok=True,
+                message="Reminder cancelled successfully.",
+                status="success"
+            ).to_dict()
+        return ToolResult(
+            ok=False,
+            error_code=ErrorCode.NOT_FOUND,
+            message="No matching active reminder found to cancel.",
+            status="failure"
+        ).to_dict()

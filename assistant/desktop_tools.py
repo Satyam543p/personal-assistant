@@ -18,6 +18,11 @@ import asyncio
 import subprocess
 import shutil
 
+try:
+    from assistant.tools import Tool
+except ModuleNotFoundError:
+    from tools import Tool
+
 logger = logging.getLogger("kate.desktop")
 
 
@@ -111,6 +116,12 @@ class ScreenshotTool:
     def capture() -> dict:
         """Captures full screen, saves PNG to Desktop/Screenshots, and copies to clipboard."""
         try:
+            try:
+                import ctypes
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
             from PIL import ImageGrab
             import io
 
@@ -121,7 +132,74 @@ class ScreenshotTool:
             filename = f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.png"
             file_path = os.path.join(shot_dir, filename)
 
-            img = ImageGrab.grab()
+            img = None
+            try:
+                img = ImageGrab.grab(all_screens=True)
+            except Exception:
+                try:
+                    img = ImageGrab.grab()
+                except Exception:
+                    pass
+
+            if img is None:
+                # Direct Win32 GDI screen grab fallback
+                try:
+                    import win32gui, win32ui, win32con
+                    from PIL import Image
+                    hwin = win32gui.GetDesktopWindow()
+                    w = win32gui.GetSystemMetrics(win32con.SM_CXSCREEN)
+                    h = win32gui.GetSystemMetrics(win32con.SM_CYSCREEN)
+                    hwindc = win32gui.GetWindowDC(hwin)
+                    srcdc = win32ui.CreateDCFromHandle(hwindc)
+                    memdc = srcdc.CreateCompatibleDC()
+                    bmp = win32ui.CreateBitmap()
+                    bmp.CreateCompatibleBitmap(srcdc, w, h)
+                    memdc.SelectObject(bmp)
+                    memdc.BitBlt((0, 0), (w, h), srcdc, (0, 0), win32con.SRCCOPY)
+                    bmpinfo = bmp.GetInfo()
+                    bmpstr = bmp.GetBitmapBits(True)
+                    img = Image.frombuffer('RGB', (bmpinfo['bmWidth'], bmpinfo['bmHeight']), bmpstr, 'raw', 'BGRX', 0, 1)
+                    win32gui.DeleteObject(bmp.GetHandle())
+                    memdc.DeleteDC()
+                    srcdc.DeleteDC()
+                    win32gui.ReleaseDC(hwin, hwindc)
+                except Exception as ex2:
+                    logger.debug(f"DC capture fallback error: {ex2}")
+
+            if img is None:
+                # PowerShell .NET CopyFromScreen fallback
+                try:
+                    escaped_path = file_path.replace("\\", "\\\\")
+                    ps_script = (
+                        "Add-Type -AssemblyName System.Windows.Forms; "
+                        "Add-Type -AssemblyName System.Drawing; "
+                        "$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+                        "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; "
+                        "$g = [System.Drawing.Graphics]::FromImage($bmp); "
+                        "$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); "
+                        f"$bmp.Save('{escaped_path}', [System.Drawing.Imaging.ImageFormat]::Png); "
+                        "$g.Dispose(); $bmp.Dispose();"
+                    )
+                    subprocess.run(
+                        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                        check=True,
+                        capture_output=True,
+                        timeout=5
+                    )
+                    if os.path.exists(file_path) and os.path.getsize(file_path) > 100:
+                        msg = "Screenshot captured and saved to your Desktop/Screenshots folder, Satyam."
+                        return {
+                            "status": "success",
+                            "file_path": file_path,
+                            "message": msg,
+                            "response": msg
+                        }
+                except Exception as ps_err:
+                    logger.debug(f"PowerShell screenshot fallback error: {ps_err}")
+
+            if img is None:
+                raise RuntimeError("Could not capture desktop screen via PIL, Win32 GDI, or PowerShell.")
+
             img.save(file_path, "PNG")
 
             # Copy to Windows clipboard
@@ -138,13 +216,15 @@ class ScreenshotTool:
             except Exception:
                 pass
 
+            msg = "Screenshot captured and saved to your Desktop/Screenshots folder, Satyam."
             return {
                 "status": "success",
                 "file_path": file_path,
-                "message": f"Screenshot captured and saved to your Desktop/Screenshots folder, Satyam."
+                "message": msg,
+                "response": msg
             }
         except Exception as e:
-            return {"status": "error", "message": f"Failed to take screenshot: {e}"}
+            return {"status": "error", "message": f"Failed to take screenshot: {e}", "response": f"Failed to take screenshot: {e}"}
 
 
 # =====================================================================
@@ -451,6 +531,162 @@ class MediaLauncher:
                 "status": "success",
                 "mode": "youtube",
                 "message": f"Playing '{title_clean.title()}' on YouTube in {used_browser}, Satyam!",
+                "response": f"Playing '{title_clean.title()}' on YouTube in {used_browser}, Satyam!",
                 "target": yt_url
             }
+
+
+# =====================================================================
+# Formal Tool Subclasses for JarvisToolExecutor
+# =====================================================================
+
+class TakeScreenshotTool(Tool):
+    def __init__(self):
+        declaration = {
+            "inputs": {},
+            "side_effects": "Captures screenshot to Desktop/Screenshots and clipboard",
+            "timeout_ms": 5000,
+            "memory_limit_mb": 50
+        }
+        super().__init__("take_screenshot", "reversible", declaration)
+
+    async def execute(self, executor, **kwargs) -> dict:
+        return ScreenshotTool.capture()
+
+
+class ControlVolumeTool(Tool):
+    def __init__(self):
+        declaration = {
+            "inputs": {
+                "direction": {"type": "string", "default": "up", "description": "up, down, or mute"},
+                "steps": {"type": "integer", "default": 5}
+            },
+            "side_effects": "Adjusts Windows master volume",
+            "timeout_ms": 3000,
+            "memory_limit_mb": 20
+        }
+        super().__init__("control_volume", "reversible", declaration)
+
+    async def execute(self, executor, **kwargs) -> dict:
+        direction = kwargs.get("direction", "up").lower()
+        steps = int(kwargs.get("steps", 5))
+        if direction == "mute":
+            res = AudioMediaControl.toggle_mute()
+        else:
+            res = AudioMediaControl.volume_step(direction, steps)
+        res["response"] = res.get("message", "")
+        return res
+
+
+class ShowDesktopTool(Tool):
+    def __init__(self):
+        declaration = {
+            "inputs": {},
+            "side_effects": "Minimizes open windows to show the desktop",
+            "timeout_ms": 3000,
+            "memory_limit_mb": 20
+        }
+        super().__init__("show_desktop", "reversible", declaration)
+
+    async def execute(self, executor, **kwargs) -> dict:
+        res = WindowControl.minimize_all()
+        res["response"] = res.get("message", "")
+        return res
+
+
+class SwitchWindowTool(Tool):
+    def __init__(self):
+        declaration = {
+            "inputs": {
+                "title_query": {"type": "string", "description": "Title or app name of the target window"}
+            },
+            "side_effects": "Activates and focuses the matching window",
+            "timeout_ms": 3000,
+            "memory_limit_mb": 20
+        }
+        super().__init__("switch_window", "reversible", declaration)
+
+    async def execute(self, executor, **kwargs) -> dict:
+        title_query = kwargs.get("title_query", "")
+        res = WindowControl.switch_to_window(title_query)
+        res["response"] = res.get("message", "")
+        return res
+
+
+class CloseWindowTool(Tool):
+    def __init__(self):
+        declaration = {
+            "inputs": {},
+            "side_effects": "Closes the current active window",
+            "timeout_ms": 3000,
+            "memory_limit_mb": 20
+        }
+        super().__init__("close_window", "reversible", declaration)
+
+    async def execute(self, executor, **kwargs) -> dict:
+        res = WindowControl.close_active_window()
+        res["response"] = res.get("message", "")
+        return res
+
+
+class PlayMusicTool(Tool):
+    def __init__(self):
+        declaration = {
+            "inputs": {
+                "title": {"type": "string", "description": "Song title or artist to play"},
+                "platform": {"type": "string", "default": "youtube", "description": "youtube, spotify, soundcloud"}
+            },
+            "side_effects": "Plays requested track in browser or app",
+            "timeout_ms": 5000,
+            "memory_limit_mb": 50
+        }
+        super().__init__("play_music", "reversible", declaration)
+
+    async def execute(self, executor, **kwargs) -> dict:
+        title = kwargs.get("title", "")
+        platform = kwargs.get("platform", "youtube")
+        res = SongPlayer.play_song(title, platform)
+        res["response"] = res.get("message", "")
+        return res
+
+
+class WebSearchBrowserTool(Tool):
+    def __init__(self):
+        declaration = {
+            "inputs": {
+                "query": {"type": "string", "description": "Search query keywords"},
+                "browser": {"type": "string", "default": "brave"}
+            },
+            "side_effects": "Opens browser searching Google for the given query",
+            "timeout_ms": 5000,
+            "memory_limit_mb": 50
+        }
+        super().__init__("web_search_browser", "reversible", declaration)
+
+    async def execute(self, executor, **kwargs) -> dict:
+        import urllib.parse
+        import webbrowser
+        query = kwargs.get("query", "").strip()
+        browser = kwargs.get("browser", "brave").lower()
+        if not query:
+            raise ValueError("Query is required for web_search_browser.")
+
+        search_url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+        brave_path = os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe")
+        if "brave" in browser and os.path.exists(brave_path):
+            try:
+                subprocess.Popen([brave_path, search_url])
+                try:
+                    from assistant.launchers.windows import _bring_to_foreground_async
+                    _bring_to_foreground_async("brave")
+                except Exception:
+                    pass
+                msg = f"Searching for '{query}' in Brave, Satyam."
+                return {"status": "success", "response": msg, "message": msg, "url": search_url}
+            except Exception:
+                pass
+        webbrowser.open(search_url)
+        msg = f"Searching for '{query}', Satyam."
+        return {"status": "success", "response": msg, "message": msg, "url": search_url}
+
 

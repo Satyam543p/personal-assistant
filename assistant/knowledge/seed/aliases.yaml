@@ -1,0 +1,17 @@
+﻿verbs:
+  chala: "play_media"
+  baja: "play_media"
+  khol: "open_app"
+  open: "open_app"
+  band kar: "close_app"
+  rok de: "pause_media"
+  hatao: "delete_file"
+  yaad rakh: "remember_fact"
+  batao: "query_knowledge"
+  wapas lo: "undo_action"
+entities:
+  yt: "youtube"
+  sp: "spotify"
+  vscode: "code"
+  terminal: "powershell"
+  cmd: "cmd"

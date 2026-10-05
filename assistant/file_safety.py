@@ -16,9 +16,14 @@ import uuid
 logger = logging.getLogger("jarvis.file_safety")
 
 try:
-    from assistant.tools import Tool
+    import send2trash
+except ImportError:
+    send2trash = None
+
+try:
+    from assistant.tools import Tool, ToolResult, ErrorCode
 except ModuleNotFoundError:
-    from tools import Tool
+    from tools import Tool, ToolResult, ErrorCode
 
 
 class QuarantineManager(abc.ABC):
@@ -132,23 +137,68 @@ class DeleteFileTool(Tool):
     async def execute(self, executor, **kwargs) -> dict:
         file_path = kwargs.get("file_path") or kwargs.get("path")
         if not file_path:
-            raise ValueError("Parameter 'file_path' is required for delete_file.")
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.EXECUTION_FAILED,
+                message="Parameter 'file_path' is required for delete_file.",
+                status="failed"
+            ).to_dict()
 
         if not executor.is_path_allowed(file_path):
-            raise PermissionError(f"Access denied to file path: {file_path}")
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.PERMISSION_DENIED,
+                message=f"Access denied to file path: {file_path}",
+                status="permission_denied"
+            ).to_dict()
 
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.NOT_FOUND,
+                message=f"File not found: {file_path}",
+                status="not_found"
+            ).to_dict()
 
         # Quarantine first
         backup_id = self.quarantine.quarantine_file(file_path, action="delete")
-        os.remove(file_path)
+        used_trash = False
+        try:
+            if send2trash:
+                send2trash.send2trash(file_path)
+                used_trash = True
+            else:
+                os.remove(file_path)
+        except Exception as e:
+            try:
+                os.remove(file_path)
+            except Exception as rm_err:
+                logger.error(f"Failed to remove file after quarantine: {rm_err} (original error: {e})")
+                return ToolResult(
+                    ok=False,
+                    error_code=ErrorCode.EXECUTION_FAILED,
+                    message=f"Failed to delete '{file_path}': {rm_err}",
+                    status="failed"
+                ).to_dict()
 
-        return {
-            "status": "success",
-            "backup_id": backup_id,
-            "response": f"Safely deleted '{file_path}'. Quarantined as backup ID '{backup_id}' (can be restored)."
-        }
+        msg = f"Safely deleted '{file_path}'. Quarantined as backup ID '{backup_id}'."
+        if used_trash:
+            msg += " Sent to Recycle Bin."
+
+        return ToolResult(
+            ok=True,
+            data={
+                "backup_id": backup_id,
+                "file_path": file_path,
+                "recycle_bin": used_trash
+            },
+            message=msg,
+            undo={
+                "action": "restore_quarantined_file",
+                "params": {"backup_id": backup_id, "destination_path": file_path}
+            },
+            status="success"
+        ).to_dict()
 
 
 class RestoreQuarantinedFileTool(Tool):
@@ -170,14 +220,28 @@ class RestoreQuarantinedFileTool(Tool):
         dest = kwargs.get("destination_path")
 
         if not backup_id:
-            raise ValueError("Parameter 'backup_id' is required for restore_quarantined_file.")
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.EXECUTION_FAILED,
+                message="Parameter 'backup_id' is required for restore_quarantined_file.",
+                status="failed"
+            ).to_dict()
 
         success = self.quarantine.restore_file(backup_id, destination_path=dest)
         if not success:
-            raise RuntimeError(f"Failed to restore quarantined file with ID '{backup_id}'.")
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.EXECUTION_FAILED,
+                message=f"Failed to restore quarantined file with ID '{backup_id}'.",
+                status="failed"
+            ).to_dict()
 
-        return {
-            "status": "success",
-            "backup_id": backup_id,
-            "response": f"Successfully restored quarantined file '{backup_id}'."
-        }
+        return ToolResult(
+            ok=True,
+            data={
+                "backup_id": backup_id,
+                "destination_path": dest
+            },
+            message=f"Successfully restored quarantined file '{backup_id}'.",
+            status="success"
+        ).to_dict()

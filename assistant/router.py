@@ -2,22 +2,23 @@ import abc
 import asyncio
 import json
 import os
+import sys
 import time
+import uuid
 import logging
+import urllib.parse
+
+# Ensure workspace root is always discoverable for assistant package imports
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
 
 try:
-    from assistant.projects import ProjectRegistry, ProjectMetadata, AmbiguousProjectError
+    from assistant.projects import AmbiguousProjectError
     from assistant.safety import get_action_description, is_confirmation, is_negation, check_voice_safety_requirement
 except ModuleNotFoundError:
-    from projects import ProjectRegistry, ProjectMetadata, AmbiguousProjectError
+    from projects import AmbiguousProjectError
     from safety import get_action_description, is_confirmation, is_negation, check_voice_safety_requirement
-
-try:
-    from assistant.apps_registry import app_registry
-    from assistant.desktop_tools import MediaLauncher, WindowControl, ScreenshotTool, AudioMediaControl, SystemControl, FolderOrganizer, SongDownloader, PDFReportGenerator
-    from assistant.self_healing import thinking_engine
-except ImportError:
-    pass
 
 try:
     from assistant.context_engine import context_engine
@@ -69,6 +70,23 @@ class Router(abc.ABC):
     async def route(self, query: str, interpretation: dict) -> dict:
         """Route parsed intent structure to corresponding execution modules."""
         pass
+
+# Desktop and Application Subsystems (imported after ABCs to avoid circular reference)
+try:
+    from assistant.apps_registry import app_registry
+    from assistant.desktop_tools import (
+        MediaLauncher, WindowControl, ScreenshotTool, AudioMediaControl,
+        SystemControl, FolderOrganizer, SongDownloader, PDFReportGenerator
+    )
+except (ImportError, ModuleNotFoundError):
+    try:
+        from apps_registry import app_registry
+        from desktop_tools import (
+            MediaLauncher, WindowControl, ScreenshotTool, AudioMediaControl,
+            SystemControl, FolderOrganizer, SongDownloader, PDFReportGenerator
+        )
+    except Exception as _e:
+        logger.warning(f"Could not import desktop_tools in router: {_e}")
 
 class SQLiteContextStore:
     def __init__(self, db_manager):
@@ -155,17 +173,20 @@ class JarvisRouter(Router):
             logger.info("Active confirmation pending. Checking user response.")
             try:
                 pending_action = json.loads(pending_action_str)
-                if is_confirmation(query):
+                now = time.time()
+                action_time = pending_action.get("timestamp", now)
+                # Enforce 30-second TTL
+                if (now - action_time) > 30.0:
                     self.context_store.delete("pending_action")
-                    intent = pending_action["intent"]
-                    entities = pending_action["entities"]
-                    resolved_ref = pending_action["resolved_reference"]
-                    
-                    try:
-                        return await self._execute_tool_safely(intent, entities, resolved_ref, bypass_confirm=True, query=query)
-                    except Exception as e:
-                        return await self._handle_routing_failure(e, f"tool:{intent}", query, interpretation)
-                elif is_negation(query):
+                    logger.info("Pending confirmation expired (>30s TTL).")
+                    return {
+                        "status": "failure",
+                        "response": "Confirmation timed out after 30 seconds. Action cancelled for safety.",
+                        "route": "confirmation_expired"
+                    }
+
+                # Check negation BEFORE affirmation
+                if is_negation(query):
                     self.context_store.delete("pending_action")
                     logger.info("User cancelled the action.")
                     return {
@@ -173,6 +194,16 @@ class JarvisRouter(Router):
                         "response": "Action cancelled.",
                         "route": "confirmation_cancelled"
                     }
+                elif is_confirmation(query):
+                    self.context_store.delete("pending_action")
+                    intent = pending_action["intent"]
+                    entities = pending_action["entities"]
+                    resolved_ref = pending_action["resolved_reference"]
+
+                    try:
+                        return await self._execute_tool_safely(intent, entities, resolved_ref, bypass_confirm=True, query=query)
+                    except Exception as e:
+                        return await self._handle_routing_failure(e, f"tool:{intent}", query, interpretation)
                 else:
                     action_desc = pending_action.get("action_description", "execute this action")
                     return {
@@ -209,24 +240,24 @@ class JarvisRouter(Router):
                         logger.info(f"Clarification successfully resolved. Routing merged intent: {intent}")
                     else:
                         rounds_str = self.context_store.get("clarify_rounds")
-                    rounds = int(rounds_str) if rounds_str else 1
-                    if rounds >= self.max_clarify_rounds:
-                        self.context_store.delete("pending_intent")
-                        self.context_store.delete("clarify_rounds")
-                        logger.warning(f"Clarification failed. MAX_CLARIFY_ROUNDS ({self.max_clarify_rounds}) reached.")
-                        return {
-                            "status": "failure",
-                            "response": "I couldn't clarify the command. What else would you like to do?",
-                            "route": "clarification_failed"
-                        }
-                    else:
-                        self.context_store.set("clarify_rounds", str(rounds + 1))
-                        question = pending_intent.get("clarification_question") or "Please clarify your command."
-                        return {
-                            "status": "clarify",
-                            "response": question,
-                            "route": "clarification_pending"
-                        }
+                        rounds = int(rounds_str) if rounds_str else 1
+                        if rounds >= self.max_clarify_rounds:
+                            self.context_store.delete("pending_intent")
+                            self.context_store.delete("clarify_rounds")
+                            logger.warning(f"Clarification failed. MAX_CLARIFY_ROUNDS ({self.max_clarify_rounds}) reached.")
+                            return {
+                                "status": "failure",
+                                "response": "I couldn't clarify the command. What else would you like to do?",
+                                "route": "clarification_failed"
+                            }
+                        else:
+                            self.context_store.set("clarify_rounds", str(rounds + 1))
+                            question = pending_intent.get("clarification_question") or "Please clarify your command."
+                            return {
+                                "status": "clarify",
+                                "response": question,
+                                "route": "clarification_pending"
+                            }
             except Exception as e:
                 logger.error(f"Error handling pending intent resolution: {e}")
                 self.context_store.delete("pending_intent")
@@ -290,7 +321,11 @@ class JarvisRouter(Router):
             "get_system_telemetry", "system_control", "send_notification",
             "git_status", "git_diff_summary", "git_commit",
             "index_codebase", "search_codebase",
-            "delete_file", "restore_quarantined_file"
+            "delete_file", "restore_quarantined_file",
+            "cancel_download", "undo_action",
+            "create_reminder", "list_reminders", "cancel_reminder",
+            "remember_fact", "query_knowledge", "forget_fact",
+            "read_pdf", "send_email", "web_search_browser"
         }
         if intent in DIRECT_TOOL_INTENTS:
             resolved_ref = interpretation.get("resolved_reference")
@@ -538,6 +573,21 @@ class JarvisRouter(Router):
                 elif intent == "generate_pdf":
                     resolved_ref = entities.get("content") or query
                     interpretation["resolved_reference"] = resolved_ref
+                elif intent == "remember_fact":
+                    resolved_ref = entities.get("key") or entities.get("content") or query
+                    interpretation["resolved_reference"] = resolved_ref
+                elif intent in ("query_knowledge", "forget_fact"):
+                    resolved_ref = entities.get("query") or query
+                    interpretation["resolved_reference"] = resolved_ref
+                elif intent == "read_pdf":
+                    resolved_ref = entities.get("file_path") or entities.get("path") or query
+                    interpretation["resolved_reference"] = resolved_ref
+                elif intent == "send_email":
+                    resolved_ref = entities.get("to") or "email"
+                    interpretation["resolved_reference"] = resolved_ref
+                elif intent == "web_search_browser":
+                    resolved_ref = entities.get("query") or query
+                    interpretation["resolved_reference"] = resolved_ref
 
             # High confidence & resolved -> call tool safely
             if resolved_ref and confidence >= self.threshold_high:
@@ -549,8 +599,7 @@ class JarvisRouter(Router):
             
             # Unresolved reference or medium confidence -> try database/context fallback
             else:
-                logger.info(f"Direct tool intent has unresolved reference or medium confidence. Fetching defaults.")
-                fallback_found = False
+                logger.info("Direct tool intent has unresolved reference or medium confidence. Fetching defaults.")
                 
                 if intent in ("open_project", "run_project") and not resolved_ref:
                     p_name = entities.get("project_name")
@@ -569,7 +618,6 @@ class JarvisRouter(Router):
                                         resolved_ref = proj_row["folder_path"]
                                         entities["project_name"] = focus_project_id
                                         interpretation["resolved_reference"] = resolved_ref
-                                        fallback_found = True
                                         logger.info(f"Fallback project resolved from current focus: {focus_project_id} -> {resolved_ref}")
                         except Exception as e:
                             logger.error(f"Error querying fallback current_focus: {e}")
@@ -582,7 +630,7 @@ class JarvisRouter(Router):
                         return await self._handle_routing_failure(e, f"tool:{intent}", query, interpretation)
                 else:
                     # Unresolvable. Issue clarification.
-                    question = f"Which project would you like to run?" if intent in ("open_project", "run_project") else "Please clarify which program or file you want to open."
+                    question = "Which project would you like to run?" if intent in ("open_project", "run_project") else "Please clarify which program or file you want to open."
                     self.context_store.set("pending_intent", json.dumps(interpretation))
                     self.context_store.set("clarify_rounds", "1")
                     return {
@@ -776,13 +824,20 @@ class JarvisRouter(Router):
             pending_intent["confidence"] = 0.95
             return pending_intent
         elif intent == "open_app":
-            apps = ["chrome", "browser", "vscode", "vs code", "notepad", "explorer", "terminal"]
-            for app in apps:
-                if app in query_lower:
-                    pending_intent["entities"]["app_name"] = app
-                    pending_intent["resolved_reference"] = app
+            try:
+                from assistant.launchers import app_launcher
+                target = app_launcher.resolver.resolve(query_lower)
+                if target:
+                    pending_intent["entities"]["app_name"] = target.name
+                    pending_intent["resolved_reference"] = target.name
                     pending_intent["confidence"] = 0.95
                     return pending_intent
+            except Exception:
+                pass
+            pending_intent["entities"]["app_name"] = query.strip()
+            pending_intent["resolved_reference"] = query.strip()
+            pending_intent["confidence"] = 0.9
+            return pending_intent
 
         # 3. Merge new entities extracted by the interpreter from the clarification query
         new_entities = interpretation.get("entities", {})
@@ -947,6 +1002,8 @@ class JarvisRouter(Router):
         if not bypass_confirm and intent == "crawl_website" and int(entities.get("max_pages", 0)) > 25 and not is_dry_run:
             action_desc = f"crawl up to {entities.get('max_pages')} pages starting from '{resolved_ref}'"
             pending_action = {
+                "action_id": str(uuid.uuid4())[:8],
+                "timestamp": time.time(),
                 "intent": intent,
                 "entities": entities,
                 "resolved_reference": resolved_ref,
@@ -964,6 +1021,8 @@ class JarvisRouter(Router):
             voice_req, voice_prompt = check_voice_safety_requirement(intent, metadata)
             if voice_req:
                 pending_action = {
+                    "action_id": str(uuid.uuid4())[:8],
+                    "timestamp": time.time(),
                     "intent": intent,
                     "entities": entities,
                     "resolved_reference": resolved_ref,
@@ -979,6 +1038,8 @@ class JarvisRouter(Router):
         if not bypass_confirm and tool_obj and tool_obj.risk_level == "destructive" and not is_dry_run:
             action_desc = get_action_description(intent, resolved_ref)
             pending_action = {
+                "action_id": str(uuid.uuid4())[:8],
+                "timestamp": time.time(),
                 "intent": intent,
                 "entities": entities,
                 "resolved_reference": resolved_ref,
@@ -1111,9 +1172,41 @@ class JarvisRouter(Router):
 
         elif intent == "generate_pdf":
             content = resolved_ref or entities.get("content") or query
-            res = PDFReportGenerator.create_pdf("Research Document", content)
-            self._write_routing_state(intent, "tool:generate_pdf")
-            return res
+        elif intent in ("search_web", "web_search_browser"):
+            q = resolved_ref or entities.get("query") or entities.get("topic") or query
+            browser = entities.get("browser")
+            search_url = f"https://www.google.com/search?q={urllib.parse.quote(q)}"
+            opened = False
+            brave_path = os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe")
+            if (browser == "brave" or "brave" in query.lower()) and os.path.exists(brave_path):
+                try:
+                    import subprocess
+                    subprocess.Popen([brave_path, search_url])
+                    opened = True
+                    try:
+                        from assistant.launchers.windows import _bring_to_foreground_async
+                        _bring_to_foreground_async("brave")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.warning(f"Failed to open Brave directly: {e}")
+            if not opened:
+                try:
+                    import webbrowser
+                    await asyncio.to_thread(webbrowser.open, search_url)
+                except Exception as e:
+                    logger.warning(f"Failed to open browser for search_web: {e}")
+
+            browser_name = "Brave" if (browser == "brave" or "brave" in query.lower()) else "browser"
+            msg = f"Searching for '{q}' in {browser_name}, Satyam."
+            self._write_routing_state(intent, f"tool:{intent}")
+            return {
+                "status": "success",
+                "response": msg,
+                "message": msg,
+                "route": f"tool:{intent}",
+                "url": search_url
+            }
 
         # Proceed normally
         res = await self.tool_executor.execute_tool(intent, entities, resolved_ref)

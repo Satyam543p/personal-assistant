@@ -135,139 +135,22 @@ class AppRegistry:
 
     def launch(self, app_name: str, browser: str = None) -> dict:
         """
-        Launches an application by name.
-        Sequence:
-          1. Check physical Desktop & Start Menu shortcuts (.lnk) -> launch via os.startfile.
-          2. Check known executable paths (VS Code, Brave, Chrome, etc.).
-          3. Check apps.json -> shell:AppsFolder / exe / URL.
-          4. Check system PATH.
-          5. Fallback: Open web app in browser.
+        Launches an application by name using the universal WindowsAppLauncher.
+        Handles registry scanning, shortcut resolution, phonetic corrections,
+        and foreground process detachment.
         """
-        import re
-        app_name_clean = app_name.strip()
-        name_lower = app_name_clean.lower()
-
-        # 1. First priority: Check physical Desktop & Start Menu shortcuts (.lnk)
-        lnk_path, display = self.find_installed_shortcut(name_lower)
-        if lnk_path and os.path.exists(lnk_path):
-            try:
-                os.startfile(lnk_path)
-                return {
-                    "status": "success",
-                    "mode": "shortcut",
-                    "message": f"Opening {display}, Satyam.",
-                    "target": lnk_path
-                }
-            except Exception as e:
-                logger.warning(f"Failed to startfile shortcut {lnk_path}: {e}")
-
-        # 2. Second priority: Known local executable paths
-        known_executables = {
-            "vs code": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
-            "vscode": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
-            "code": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
-            "visual studio code": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
-            "brave": os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-            "chrome": os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-            "google chrome": os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-            "notepad": "notepad.exe",
-            "calculator": "calc.exe",
-            "calc": "calc.exe",
-            "paint": "mspaint.exe"
-        }
-        for alias, exe in known_executables.items():
-            if name_lower == alias:
-                if os.path.isabs(exe) and os.path.exists(exe):
-                    try:
-                        os.startfile(exe)
-                        return {
-                            "status": "success",
-                            "mode": "executable",
-                            "message": f"Opening {app_name_clean.title()}, Satyam.",
-                            "target": exe
-                        }
-                    except Exception as e:
-                        logger.warning(f"os.startfile failed for {exe}: {e}")
-                elif not os.path.isabs(exe):
-                    try:
-                        os.startfile(exe)
-                        return {
-                            "status": "success",
-                            "mode": "executable",
-                            "message": f"Opening {app_name_clean.title()}, Satyam.",
-                            "target": exe
-                        }
-                    except Exception as e:
-                        logger.warning(f"os.startfile failed for {exe}: {e}")
-
-        # 3. Try apps.json
-        entry = self.find_app(name_lower)
-        if entry:
-            appid = entry["appid"]
-            display_name = entry["display_name"]
-
-            # If AppID is a web URL
-            if appid.startswith("http://") or appid.startswith("https://"):
-                self._open_url(appid, browser)
-                return {
-                    "status": "success",
-                    "mode": "url",
-                    "message": f"Opened {display_name} in your browser, Satyam.",
-                    "target": appid
-                }
-
-            # If AppID is an explicit .exe file path on disk
-            if os.path.isabs(appid) and os.path.exists(appid):
-                try:
-                    os.startfile(appid)
-                    return {
-                        "status": "success",
-                        "mode": "exe",
-                        "message": f"Opening {display_name}, Satyam.",
-                        "target": appid
-                    }
-                except Exception as e:
-                    logger.warning(f"Direct launch failed for {appid}: {e}")
-
-            # Standard Windows AppID (UWP or Start Menu shortcut)
-            try:
-                cmd = ["explorer.exe", f"shell:AppsFolder\\{appid}"]
-                subprocess.Popen(cmd)
-                return {
-                    "status": "success",
-                    "mode": "shell_apps_folder",
-                    "message": f"Opening {display_name}, Satyam.",
-                    "target": appid
-                }
-            except Exception as e:
-                logger.error(f"Failed to launch via shell:AppsFolder: {e}")
-
-        # 4. Try standard system executable via PATH
-        exe_path = shutil.which(name_lower) or shutil.which(f"{name_lower}.exe")
-        if exe_path:
-            try:
-                os.startfile(exe_path)
-                return {
-                    "status": "success",
-                    "mode": "system_path",
-                    "message": f"Opening {app_name_clean.title()}, Satyam.",
-                    "target": exe_path
-                }
-            except Exception as e:
-                logger.warning(f"PATH execution failed for {exe_path}: {e}")
-
-        # 5. Graceful Fallback: Open Web Application in Browser
-        web_url = WEB_APP_FALLBACKS.get(name_lower)
-        if not web_url:
-            web_url = f"https://www.google.com/search?q={app_name_clean}+web+app"
-
-        self._open_url(web_url, browser)
-        return {
-            "status": "success",
-            "mode": "web_fallback",
-            "message": f"Opening {app_name_clean.title()} in your browser, Satyam.",
-            "target": web_url
-        }
+        try:
+            from assistant.launchers import app_launcher
+            res = app_launcher.launch_by_name(app_name, browser=browser)
+            return res.to_dict()
+        except Exception as e:
+            logger.warning(f"Universal launcher failed, attempting legacy fallback: {e}")
+            return {
+                "status": "error",
+                "mode": "error",
+                "message": f"Failed to launch {app_name}: {e}",
+                "target": app_name
+            }
 
     def _open_url(self, url: str, browser: str = None):
         """Opens URL in specified browser or system default."""

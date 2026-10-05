@@ -1,0 +1,14 @@
+﻿style:
+  directness: "concise"
+  personality: "proactive, polite, engineering-focused"
+  code_explanation: "clear with interfaces and abstractions first"
+media:
+  default_download_quality: "bestaudio/best"
+  preferred_video_resolution: "1080p"
+apps:
+  preferred_browser: "brave"
+  secondary_browser: "chrome"
+  preferred_code_editor: "code"
+privacy:
+  secret_redaction: true
+  incognito_mode: false

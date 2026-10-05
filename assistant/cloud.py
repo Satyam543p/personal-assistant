@@ -3,8 +3,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
-import socket
 import time
 import urllib.error
 import urllib.parse
@@ -13,9 +11,11 @@ import urllib.request
 try:
     from assistant.router import CloudClient
     import assistant.config as config
+    from assistant.safety import redact_secrets
 except ModuleNotFoundError:
     from router import CloudClient
     import config
+    from safety import redact_secrets
 
 logger = logging.getLogger("jarvis.cloud")
 
@@ -682,8 +682,9 @@ class JarvisCloudClient(CloudClient):
                 "tokens_used": 0
             }
 
-        # 4. Context Budget Management
+        # 4. Context Budget Management & Secret Redaction
         bounded_prompt = self._truncate_or_summarize_context(query)
+        bounded_prompt = redact_secrets(bounded_prompt)
         system_prompt = intent_data.get("system_prompt") or DEFAULT_JARVIS_PERSONA
 
         # 5. Execution with Exponential Backoff Retry

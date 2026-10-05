@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
 *.class
 
 # Distribution / packaging
@@ -9,12 +10,15 @@ dist/
 *.egg-info/
 *.spec
 
-# Environments
+# Environments & Secrets
 .env
 .env.*
+!.env.example
 env/
 venv/
 ENV/
+*.pem
+*.key
 
 # Databases and Local State
 *.db
@@ -35,9 +39,27 @@ desktop.ini
 .idea/
 .vscode/
 
-# Temporary scratch
+# Temporary & Scratch
 scratch/
-
 assistant/backups/
 *.mp3
+*.wav
+*.mp4
 
+# Kate User Auth & Sensitive State
+.kate/
+cookies.txt
+*.cookies
+auth/
+
+# Large Models & Binaries
+models/
+assistant/models/
+*.gguf
+*.bin
+*.onnx
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/

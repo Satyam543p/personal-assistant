@@ -1,5 +1,4 @@
 import os
-import sys
 import abc
 import json
 import uuid
@@ -15,6 +14,119 @@ try:
 except ModuleNotFoundError:
     from router import ToolExecutor
 
+from enum import Enum
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# =====================================================================
+# Tool Contract & Error Standardization (Phase 2 Master Architecture)
+# =====================================================================
+
+class ErrorCode(str, Enum):
+    NOT_FOUND = "NOT_FOUND"
+    FILE_NOT_FOUND = "FILE_NOT_FOUND"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    PATH_FORBIDDEN = "PATH_FORBIDDEN"
+    NETWORK_ERROR = "NETWORK_ERROR"
+    UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"
+    CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
+    DISK_FULL = "DISK_FULL"
+    RATE_LIMITED = "RATE_LIMITED"
+    LOGIN_REQUIRED = "LOGIN_REQUIRED"
+    DRM_PROTECTED = "DRM_PROTECTED"
+    TOOL_MISSING = "TOOL_MISSING"
+    CAPABILITY_GAP = "CAPABILITY_GAP"
+    TIMEOUT = "TIMEOUT"
+    CANCELLED = "CANCELLED"
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+
+RETRYABLE_ERROR_CODES = {
+    ErrorCode.NETWORK_ERROR,
+    ErrorCode.TIMEOUT,
+    ErrorCode.RATE_LIMITED,
+}
+
+@dataclass
+class ToolResult:
+    ok: bool
+    data: dict = field(default_factory=dict)
+    message: str = ""
+    error_code: ErrorCode | None = None
+    retryable: bool | None = None
+    alternatives_tried: list[str] = field(default_factory=list)
+    undo: dict | None = None
+    warnings: list[str] = field(default_factory=list)
+    status: str = "success"
+
+    def __post_init__(self):
+        if self.retryable is None:
+            self.retryable = self.error_code in RETRYABLE_ERROR_CODES
+        if not self.ok and self.status == "success":
+            self.status = "failure"
+
+    def to_dict(self) -> dict:
+        code_val = self.error_code.value if isinstance(self.error_code, ErrorCode) else self.error_code
+        res = {
+            "ok": self.ok,
+            "data": self.data,
+            "message": self.message,
+            "error_code": code_val,
+            "retryable": bool(self.retryable),
+            "alternatives_tried": self.alternatives_tried,
+            "undo": self.undo,
+            "warnings": self.warnings,
+            "status": self.status,
+            "response": self.message,  # backward compatibility
+        }
+        for k, v in self.data.items():
+            if k not in res:
+                res[k] = v
+        return res
+
+
+def normalize_tool_result(raw_result: dict | ToolResult) -> dict:
+    """Normalizes any tool output dictionary to the unified ToolResult contract."""
+    if isinstance(raw_result, ToolResult):
+        return raw_result.to_dict()
+    if not isinstance(raw_result, dict):
+        return ToolResult(
+            ok=True,
+            data={"raw": raw_result},
+            message=str(raw_result),
+            status="success"
+        ).to_dict()
+
+    if "ok" in raw_result and "error_code" in raw_result and "message" in raw_result:
+        return raw_result
+
+    status = raw_result.get("status", "success")
+    ok = raw_result.get("ok", status in ("success", "remediated", "thinking_remediated"))
+    message = raw_result.get("message") or raw_result.get("response") or raw_result.get("summary") or ""
+    error_code = raw_result.get("error_code")
+    retryable = raw_result.get("retryable", error_code in RETRYABLE_ERROR_CODES if error_code else False)
+    alternatives_tried = raw_result.get("alternatives_tried", [])
+    undo = raw_result.get("undo")
+    warnings = raw_result.get("warnings", [])
+
+    data_payload = raw_result.get("data")
+    if not isinstance(data_payload, dict):
+        data_payload = {
+            k: v for k, v in raw_result.items()
+            if k not in ("ok", "status", "message", "response", "error_code", "retryable", "alternatives_tried", "undo", "warnings")
+        }
+
+    return ToolResult(
+        ok=ok,
+        data=data_payload,
+        message=message,
+        error_code=error_code,
+        retryable=retryable,
+        alternatives_tried=alternatives_tried,
+        undo=undo,
+        warnings=warnings,
+        status=status
+    ).to_dict()
+
 # =====================================================================
 # Tool Base Class
 # =====================================================================
@@ -27,7 +139,7 @@ class Tool(abc.ABC):
 
     @abc.abstractmethod
     async def execute(self, executor, **kwargs) -> dict:
-        """Execute the tool's operation. Returns a dict containing 'status' and results."""
+        """Execute the tool's operation. Returns a dict containing 'ok', 'data', 'message', 'status'."""
         pass
 
 # =====================================================================
@@ -54,34 +166,18 @@ class OpenAppTool(Tool):
         if not app_name:
             raise ValueError("Application name parameter 'app_name' is required.")
 
-        ALLOWED_APPS = {"vscode", "notepad", "chrome", "explorer", "terminal", "browser", "youtube", "google", "calculator", "calc"}
-        if app_name not in ALLOWED_APPS:
-            raise ValueError(f"Application '{app_name}' is not in the allowed whitelist.")
-
-        # Determine launch command mapping on Windows
-        if app_name == "vscode":
-            cmd = ["cmd.exe", "/c", "code"]
-        elif app_name == "notepad":
-            cmd = ["notepad.exe"]
-        elif app_name in ("chrome", "browser", "google"):
-            cmd = ["explorer.exe", "https://www.google.com"]
-        elif app_name == "youtube":
-            cmd = ["explorer.exe", "https://www.youtube.com"]
-        elif app_name in ("calculator", "calc"):
-            cmd = ["calc.exe"]
-        elif app_name == "explorer":
-            cmd = ["explorer.exe"]
-        elif app_name == "terminal":
-            cmd = ["powershell.exe"]
-        else:
-            raise ValueError(f"Launch command not configured for whitelisted app '{app_name}'")
-
-        logger.info(f"Launching whitelisted app '{app_name}' with command: {cmd}")
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return {
-            "status": "success",
-            "response": f"Launched whitelisted application '{app_name}'."
-        }
+        try:
+            from assistant.launchers import app_launcher
+            res = app_launcher.launch_by_name(app_name)
+            return {
+                "status": res.status,
+                "response": res.message,
+                "target": res.target,
+                "mode": res.mode
+            }
+        except Exception as e:
+            logger.error(f"Failed to launch app '{app_name}': {e}")
+            raise ValueError(f"Could not launch application '{app_name}': {e}")
 
 class OpenProjectTool(Tool):
     def __init__(self, memory_manager = None):
@@ -283,9 +379,161 @@ class WriteFileTool(Tool):
             "response": f"Successfully wrote contents to file '{file_path}'."
         }
 
+class AllowFolderTool(Tool):
+    def __init__(self):
+        declaration = {
+            "inputs": {
+                "folder_path": {
+                    "type": "string",
+                    "description": "Folder path to whitelist for assistant operations (e.g. D:\\Sem5)"
+                }
+            },
+            "side_effects": "Permanently registers folder path in allowed_paths table",
+            "timeout_ms": 5000,
+            "memory_limit_mb": 50
+        }
+        super().__init__("allow_folder", "reversible", declaration)
+
+    async def execute(self, executor, **kwargs) -> dict:
+        folder_path = kwargs.get("folder_path") or kwargs.get("path")
+        if not folder_path:
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.PERMISSION_DENIED,
+                message="Folder path parameter 'folder_path' is required.",
+                status="failure"
+            ).to_dict()
+
+        target = Path(folder_path).resolve(strict=False)
+        if not target.exists():
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.NOT_FOUND,
+                message=f"Directory '{target}' does not exist on disk.",
+                status="failure"
+            ).to_dict()
+
+        norm_target_str = os.path.normcase(str(target))
+        if norm_target_str in ("c:\\", "d:\\", "e:\\", "c:/", "d:/", "e:/"):
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.PERMISSION_DENIED,
+                message="Cannot allow root drive directory directly.",
+                status="failure"
+            ).to_dict()
+
+        try:
+            with executor.db.transaction() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS allowed_paths (
+                        id TEXT PRIMARY KEY,
+                        folder_path TEXT UNIQUE NOT NULL,
+                        created_at INTEGER NOT NULL
+                    );
+                """)
+                conn.execute(
+                    "INSERT INTO allowed_paths (id, folder_path, created_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(folder_path) DO NOTHING;",
+                    (str(uuid.uuid4()), str(target), int(time.time()))
+                )
+            return ToolResult(
+                ok=True,
+                data={"folder_path": str(target)},
+                message=f"Successfully allowed folder '{target}' for assistant file operations.",
+                status="success"
+            ).to_dict()
+        except Exception as e:
+            return ToolResult(
+                ok=False,
+                error_code=ErrorCode.EXECUTION_FAILED,
+                message=f"Failed to record allowed path: {e}",
+                status="failure"
+            ).to_dict()
+
 # =====================================================================
 # Tool Executor Component
 # =====================================================================
+
+def is_path_allowed(path: str, db=None) -> bool:
+    """
+    Validates that a path resides within allowed roots and is not inside blocked system directories.
+    Resolves symlinks and Windows junctions, comparing paths case-insensitively.
+    """
+    if not path:
+        return False
+
+    try:
+        target = Path(path).resolve(strict=False)
+        norm_target_str = os.path.normcase(str(target))
+    except Exception:
+        return False
+
+    # 1. Block bare drive roots (e.g. "c:\\", "d:\\")
+    if target.parent == target or norm_target_str in ("c:\\", "d:\\", "e:\\", "c:/", "d:/", "e:/"):
+        return False
+
+    # 2. Block sensitive Windows system roots
+    BLOCKED_SYSTEM_DIRS = [
+        os.path.normcase(os.environ.get("SystemRoot", r"C:\Windows")),
+        os.path.normcase(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")),
+        os.path.normcase(os.environ.get("ProgramFiles", r"C:\Program Files")),
+        os.path.normcase(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+        os.path.normcase(os.environ.get("ProgramData", r"C:\ProgramData")),
+        os.path.normcase(os.path.join(str(Path.home()), "AppData", "Roaming", "Microsoft")),
+    ]
+    for blocked in BLOCKED_SYSTEM_DIRS:
+        if blocked and norm_target_str.startswith(blocked):
+            return False
+
+    # 3. Standard allowed roots
+    import tempfile
+    allowed_roots = [
+        Path.cwd().resolve(strict=False),
+        Path(tempfile.gettempdir()).resolve(strict=False),
+        (Path.home() / "Downloads").resolve(strict=False),
+        (Path.home() / "Desktop").resolve(strict=False),
+        (Path.home() / "Documents").resolve(strict=False),
+        (Path.home() / ".gemini" / "antigravity").resolve(strict=False),
+    ]
+
+    # Add workspace root from config if available
+    try:
+        import assistant.config as config
+        if hasattr(config, "WORKSPACE_ROOT") and config.WORKSPACE_ROOT:
+            allowed_roots.append(Path(config.WORKSPACE_ROOT).resolve(strict=False))
+    except Exception:
+        pass
+
+    # 4. Check standard roots
+    for root in allowed_roots:
+        norm_root_str = os.path.normcase(str(root))
+        if norm_target_str.startswith(norm_root_str):
+            return True
+
+    # 5. Check registered projects and allowed custom paths in SQLite
+    if db:
+        try:
+            with db.transaction() as conn:
+                cursor = conn.cursor()
+                # Projects table
+                cursor.execute("SELECT folder_path FROM projects;")
+                for row in cursor.fetchall():
+                    p_path = os.path.normcase(str(Path(row["folder_path"]).resolve(strict=False)))
+                    if norm_target_str.startswith(p_path):
+                        return True
+                # Allowed paths table
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='allowed_paths';")
+                if cursor.fetchone():
+                    cursor.execute("SELECT folder_path FROM allowed_paths;")
+                    for row in cursor.fetchall():
+                        a_path = os.path.normcase(str(Path(row["folder_path"]).resolve(strict=False)))
+                        if norm_target_str.startswith(a_path):
+                            return True
+        except Exception as e:
+            logger.debug(f"Error querying allowed database paths: {e}")
+
+    return False
+
 
 class JarvisToolExecutor(ToolExecutor):
     def __init__(self, db_manager):
@@ -323,6 +571,7 @@ class JarvisToolExecutor(ToolExecutor):
         self.tools["search_codebase"] = SearchCodebaseTool()
         self.tools["delete_file"] = DeleteFileTool()
         self.tools["restore_quarantined_file"] = RestoreQuarantinedFileTool()
+        self.tools["allow_folder"] = AllowFolderTool()
         
         self._seed_tools_registry()
 
@@ -366,35 +615,7 @@ class JarvisToolExecutor(ToolExecutor):
             logger.error(f"Failed to seed core tools database registry: {e}")
 
     def is_path_allowed(self, path: str) -> bool:
-        """Validates that a path resides within allowed workspace directories or active project directories."""
-        if not path:
-            return False
-            
-        abs_path = os.path.abspath(path).lower()
-        
-        # 1. Check workspace root containment
-        workspace_root = os.path.abspath("c:/Users/Satyam Pandey/Desktop/personal assistent").lower()
-        if abs_path.startswith(workspace_root):
-            return True
-            
-        # 2. Check app data directory containment
-        app_data_dir = os.path.abspath("C:/Users/Satyam Pandey/.gemini/antigravity").lower()
-        if abs_path.startswith(app_data_dir):
-            return True
-            
-        # 3. Check registered project directory containment
-        try:
-            with self.db.transaction() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT folder_path FROM projects;")
-                for row in cursor.fetchall():
-                    proj_path = os.path.abspath(row["folder_path"]).lower()
-                    if abs_path.startswith(proj_path):
-                        return True
-        except Exception as e:
-            logger.error(f"Error querying allowed project paths for prefix check: {e}")
-            
-        return False
+        return is_path_allowed(path, self.db)
 
     async def execute_tool(self, intent: str, entities: dict, resolved_reference: str) -> dict:
         # Map intents to registered core tools
@@ -507,6 +728,8 @@ class JarvisToolExecutor(ToolExecutor):
                 kwargs["file_path"] = kwargs.get("file_path") or resolved_reference
             elif tool_name == "restore_quarantined_file":
                 kwargs["backup_id"] = kwargs.get("backup_id") or resolved_reference
+            elif tool_name == "allow_folder":
+                kwargs["folder_path"] = kwargs.get("folder_path") or resolved_reference
 
         # Remove keys with None values so tool defaults can apply
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -561,4 +784,4 @@ class JarvisToolExecutor(ToolExecutor):
             except Exception as log_err:
                 logger.error(f"Failed to record tool execution logs: {log_err}")
 
-        return result
+        return normalize_tool_result(result)

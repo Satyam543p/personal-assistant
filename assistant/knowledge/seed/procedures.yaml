@@ -1,0 +1,18 @@
+﻿procedures:
+  study_mode:
+    description: "Focus environment for studying computer science"
+    actions:
+      - "close distracting media players"
+      - "open brave to study resources"
+      - "mute non-critical notification sounds"
+  coding_mode:
+    description: "Development environment for coding"
+    actions:
+      - "open VS Code in workspace"
+      - "open powershell terminal"
+  morning_briefing:
+    description: "Daily morning status briefing"
+    actions:
+      - "fetch active focus project"
+      - "list today's active reminders"
+      - "report weather and priority tasks"

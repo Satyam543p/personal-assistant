@@ -9,7 +9,6 @@ Combines hands-free voice-first operation with an expandable Companion Hub conta
 """
 
 import math
-import sys
 import os
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 import re
@@ -18,31 +17,33 @@ import asyncio
 import logging
 import threading
 import tempfile
-import subprocess
 from PyQt6.QtCore import (
-    Qt, QTimer, QUrl, QRectF, pyqtSignal, pyqtSlot, QThread, QPoint, QMetaObject
+    Qt, QTimer, QRectF, pyqtSignal, pyqtSlot, QThread, QMetaObject
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QRadialGradient, QLinearGradient, QPen, QBrush,
-    QPainterPath, QFont, QKeyEvent, QCursor
+    QPainterPath, QKeyEvent, QCursor
 )
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QTextEdit,
+    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QLabel, QFrame, QGraphicsDropShadowEffect, QApplication,
-    QScrollArea, QSplitter, QSizePolicy, QListWidget, QListWidgetItem
+    QScrollArea, QSplitter, QListWidget, QListWidgetItem
 )
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 try:
     from assistant.ipc import HTTPIPCClient
     from assistant.voice_wake import find_working_microphone
     from assistant.ui.settings_window import SettingsDialog
-    import assistant.config as config
+    from assistant.ui.orb_renderer import IOrbRenderer, OrbState
 except ModuleNotFoundError:
     from ipc import HTTPIPCClient
     from voice_wake import find_working_microphone
     from ui.settings_window import SettingsDialog
-    import config
+    try:
+        from ui.orb_renderer import IOrbRenderer, OrbState
+    except ImportError:
+        class IOrbRenderer: pass
+        class OrbState: pass
 
 logger = logging.getLogger("kate.ui.siri")
 
@@ -53,6 +54,8 @@ logger = logging.getLogger("kate.ui.siri")
 
 def play_chime(kind: str = "trigger"):
     """Plays Apple Siri-style audio cues via native Windows sound (non-blocking)."""
+    if os.environ.get("JARVIS_MUTE_SOUNDS") == "1" or os.environ.get("KATE_SILENT_MODE") == "1":
+        return
     def _run():
         try:
             import winsound
@@ -92,7 +95,7 @@ class NeuralVoiceSpeaker:
     NEURAL_PITCH = "+2Hz"
 
     def __init__(self):
-        self.enabled = True
+        self.enabled = (os.environ.get("JARVIS_MUTE_SOUNDS") != "1" and os.environ.get("KATE_SILENT_MODE") != "1")
         self._sapi_voice = None
         self._edge_available = False
         self._setup()
@@ -204,15 +207,27 @@ class NeuralVoiceSpeaker:
                 return
 
             try:
-                if not pygame.mixer.get_init():
-                    pygame.mixer.init()
+                try:
+                    if not pygame.mixer.get_init():
+                        pygame.init()
+                        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+                except Exception:
+                    if not pygame.mixer.get_init():
+                        pygame.mixer.init()
+
                 pygame.mixer.music.load(mp3_path)
                 pygame.mixer.music.play()
-                while pygame.mixer.music.get_busy():
+                while pygame.mixer.get_init() and pygame.mixer.music.get_busy():
                     time.sleep(0.05)
             except Exception as e:
                 logger.warning(f"Pygame playback error: {e}")
             finally:
+                try:
+                    if pygame.mixer.get_init():
+                        pygame.mixer.music.stop()
+                        pygame.mixer.music.unload()
+                except Exception:
+                    pass
                 try:
                     os.remove(mp3_path)
                 except Exception:
@@ -232,13 +247,40 @@ class NeuralVoiceSpeaker:
                     pass
 
     def _speak_sapi(self, text, on_done_callback):
-        if self._sapi_voice:
+        co_init = False
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            co_init = True
+        except Exception:
+            pass
+
+        try:
+            import win32com.client
+            voice = win32com.client.Dispatch("SAPI.SpVoice")
+            voice.Rate = 1
+            voice.Speak(text)
+        except Exception as e:
+            logger.warning(f"SAPI speak error: {e}")
             try:
-                self._sapi_voice.Speak(text, 1 | 2)
+                import pyttsx3
+                engine = pyttsx3.init()
+                engine.say(text)
+                engine.runAndWait()
+            except Exception as e2:
+                logger.warning(f"pyttsx3 fallback error: {e2}")
+        finally:
+            if co_init:
+                try:
+                    import pythoncom
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+        if on_done_callback:
+            try:
+                on_done_callback()
             except Exception:
                 pass
-        if on_done_callback:
-            on_done_callback()
 
     def stop(self):
         try:
@@ -341,16 +383,18 @@ class VoiceRecognitionWorker(QThread):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Clickable Liquid Mercury Glowing Orb
+# Clickable Next-Gen Liquid Kate Orb (IOrbRenderer)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class LiquidMercuryOrb(QWidget):
+class LiquidKateOrb(QWidget):
     """
-    Liquid Mercury Floating Droplet:
-      - Photorealistic liquid metal / quicksilver reflection aesthetic (matches media_1790488969282.png)
-      - Smooth harmonic surface tension ripples responding dynamically to voice & sound
-      - Rotating pearlescent constellation nodes during 'thinking' state (matches media_1790488988537.png)
-      - Pure standalone floating droplet with zero clipping and zero box clutter
+    Next-Gen Liquid Mercury Bioluminescent Kate Orb:
+      - Photorealistic liquid metal quicksilver curvature with prismatic horizon reflection
+      - Dynamic harmonic breathing pulse & audio-reactive sonic wave displacement
+      - Concentric translucent audio ripples expanding during listening/speaking
+      - Celestial quantum singularity core with 8 orbiting constellation particles during thinking
+      - Tactile liquid ripple shockwave on click with spring relaxation
+      - Standalone zero-clutter floating droplet aesthetic
     """
     clicked = pyqtSignal()
 
@@ -365,9 +409,13 @@ class LiquidMercuryOrb(QWidget):
         self.audio_energy = 0.0
         self._press_pos = None
 
+        # Tactile ripple physics
+        self.click_ripple_radius = 0.0
+        self.click_ripple_alpha = 0
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_animation)
-        self.timer.start(20)  # 50 FPS silky smooth animation
+        self.timer.start(16)  # 60 FPS silky smooth rendering
 
     def set_state(self, state: str):
         self.current_state = state
@@ -377,15 +425,26 @@ class LiquidMercuryOrb(QWidget):
         self.audio_energy = max(0.0, min(1.0, level))
         self.update()
 
+    def trigger_click_feedback(self):
+        self.click_ripple_radius = 4.0
+        self.click_ripple_alpha = 230
+        self.update()
+
     def _update_animation(self):
         speeds = {
-            "thinking": 0.08,
+            "thinking": 0.075,
             "listening": 0.09,
             "speaking": 0.07,
-            "waiting_permission": 0.06,
-            "idle": 0.025
+            "waiting_permission": 0.05,
+            "idle": 0.022
         }
-        self.phase = (self.phase + speeds.get(self.current_state, 0.025)) % (2 * math.pi)
+        self.phase = (self.phase + speeds.get(self.current_state, 0.022)) % (2 * math.pi)
+
+        # Decay click shockwave
+        if self.click_ripple_alpha > 0:
+            self.click_ripple_radius += 2.2
+            self.click_ripple_alpha = max(0, self.click_ripple_alpha - 15)
+
         self.update()
 
     def enterEvent(self, event):
@@ -408,6 +467,7 @@ class LiquidMercuryOrb(QWidget):
             diff = (event.globalPosition().toPoint() - self._press_pos).manhattanLength()
             if diff < 6:
                 play_chime("confirm")
+                self.trigger_click_feedback()
                 self.clicked.emit()
         super().mouseReleaseEvent(event)
 
@@ -415,64 +475,86 @@ class LiquidMercuryOrb(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = float(self.width()), float(self.height())
-        cx, cy = w / 2.0, (h / 2.0) - 2.0  # Subtle elevation for bottom 3D shadow
+        cx, cy = w / 2.0, (h / 2.0) - 2.0
 
         is_listening = self.current_state == "listening"
         is_thinking = self.current_state == "thinking"
         is_speaking = self.current_state == "speaking"
         is_permission = self.current_state == "waiting_permission"
 
-        # Convex 3D droplet radii (slightly wider than tall, exactly matching media_1790488969282.png)
-        rx = 31.0
-        ry = 27.0
+        # ── Dynamic Breathing & Audio Harmonics ──
+        breathe = math.sin(self.phase * 1.5) * 1.4
+        rx = 32.0 + breathe
+        ry = 28.0 + breathe * 0.8
         if self.is_hovered:
-            rx += 1.5
-            ry += 1.2
+            rx += 2.0
+            ry += 1.6
 
-        # ── 1. Soft 3D Floating Cast Shadow Underneath ─────────────────────
-        shadow_y = cy + ry * 0.72
-        shadow_rect = QRectF(cx - rx * 0.85, shadow_y - 6, rx * 1.7, 14)
-        shadow_grad = QRadialGradient(cx, shadow_y, rx * 0.85)
-        shadow_grad.setColorAt(0.0, QColor(0, 0, 0, 150))
-        shadow_grad.setColorAt(0.4, QColor(0, 0, 0, 75))
+        # Audio boost
+        energy_scale = self.audio_energy if (is_listening or is_speaking) else 0.0
+        rx += energy_scale * 5.0
+        ry += energy_scale * 4.0
+
+        # ── 1. Soft 3D Cast Shadow ──
+        shadow_y = cy + ry * 0.74
+        shadow_rect = QRectF(cx - rx * 0.88, shadow_y - 6, rx * 1.76, 14)
+        shadow_grad = QRadialGradient(cx, shadow_y, rx * 0.88)
+        shadow_grad.setColorAt(0.0, QColor(0, 0, 0, 160))
+        shadow_grad.setColorAt(0.45, QColor(0, 0, 0, 80))
         shadow_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setBrush(QBrush(shadow_grad))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(shadow_rect)
 
-        # ── 2. Subtle Outer Ambient Glow ──────────────────────────────────
-        glow_alpha = 95 if is_listening else (75 if is_thinking else (120 if is_permission else 45))
-        glow_r = rx + 11.0
+        # ── 2. Bioluminescent Outer Aura / Sonic Sonar Rings ──
+        glow_r = rx + 14.0 + (energy_scale * 12.0)
+        glow_alpha = 110 if is_listening else (90 if is_thinking else (140 if is_permission else 55))
         glow_grad = QRadialGradient(cx, cy, glow_r)
+
         if is_permission:
-            glow_grad.setColorAt(0.0, QColor(255, 180, 50, glow_alpha))
-            glow_grad.setColorAt(0.6, QColor(255, 120, 20, glow_alpha // 2))
+            glow_grad.setColorAt(0.0, QColor(255, 185, 45, glow_alpha))
+            glow_grad.setColorAt(0.5, QColor(255, 130, 20, glow_alpha // 2))
         elif is_listening:
-            glow_grad.setColorAt(0.0, QColor(0, 215, 255, glow_alpha))
-            glow_grad.setColorAt(0.6, QColor(0, 130, 255, glow_alpha // 2))
+            glow_grad.setColorAt(0.0, QColor(0, 235, 255, glow_alpha))
+            glow_grad.setColorAt(0.5, QColor(0, 140, 255, glow_alpha // 2))
         elif is_thinking:
-            glow_grad.setColorAt(0.0, QColor(240, 245, 255, glow_alpha))
-            glow_grad.setColorAt(0.6, QColor(180, 200, 235, glow_alpha // 2))
+            glow_grad.setColorAt(0.0, QColor(160, 120, 255, glow_alpha))
+            glow_grad.setColorAt(0.5, QColor(90, 50, 240, glow_alpha // 2))
+        elif is_speaking:
+            glow_grad.setColorAt(0.0, QColor(255, 215, 100, glow_alpha))
+            glow_grad.setColorAt(0.5, QColor(245, 145, 30, glow_alpha // 2))
         else:
-            glow_grad.setColorAt(0.0, QColor(220, 235, 255, glow_alpha))
-            glow_grad.setColorAt(0.6, QColor(160, 185, 220, glow_alpha // 2))
+            # Ethereal quicksilver pulse with iridescent blue/violet highlight
+            glow_grad.setColorAt(0.0, QColor(210, 230, 255, glow_alpha))
+            glow_grad.setColorAt(0.5, QColor(140, 175, 230, glow_alpha // 2))
         glow_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
 
         painter.setBrush(QBrush(glow_grad))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(QRectF(cx - glow_r, cy - glow_r, glow_r * 2, glow_r * 2))
 
+        # Concentric audio ripple sonar rings when listening/speaking
+        if is_listening or is_speaking:
+            ring_rad = rx + 6.0 + (math.sin(self.phase * 4.0) * 4.0) + (energy_scale * 8.0)
+            ring_pen = QPen(QColor(0, 235, 255, 80) if is_listening else QColor(255, 215, 100, 80), 1.5)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(ring_pen)
+            painter.drawEllipse(QRectF(cx - ring_rad, cy - ring_rad, ring_rad * 2, ring_rad * 2))
+
         # ── 3. Fluid Droplet Contour Path (Harmonic Surface Wave Ripples) ──
         path = QPainterPath()
-        num_pts = 64
+        num_pts = 72
         first_pt = None
 
-        wave_amp = 1.3 if is_listening else (0.8 if is_speaking else 0.35)
+        wave_amp = 1.6 if is_listening else (1.1 if is_speaking else (0.8 if is_thinking else 0.4))
+        if energy_scale > 0:
+            wave_amp += energy_scale * 2.5
+
         for k in range(num_pts):
             theta = k * (2.0 * math.pi / num_pts)
             w_offset = (
-                math.sin(2.0 * theta + self.phase * 3.0) * wave_amp +
-                math.cos(4.0 * theta - self.phase * 2.0) * (wave_amp * 0.4)
+                math.sin(2.0 * theta + self.phase * 3.2) * wave_amp +
+                math.cos(4.0 * theta - self.phase * 2.4) * (wave_amp * 0.45)
             )
             cur_rx = rx + w_offset
             cur_ry = ry + w_offset * 0.85
@@ -487,19 +569,25 @@ class LiquidMercuryOrb(QWidget):
             path.lineTo(first_pt[0], first_pt[1])
         path.closeSubpath()
 
-        # ── 4. Volumetric 3D Convex Base Gradient ─────────────────────────
+        # ── 4. Volumetric 3D Convex Base Gradient ──
         core_grad = QRadialGradient(cx - rx * 0.22, cy - ry * 0.28, rx * 1.35)
         if is_permission:
-            core_grad.setColorAt(0.00, QColor(255, 230, 180, 255))
-            core_grad.setColorAt(0.20, QColor(220, 150, 60, 255))
-            core_grad.setColorAt(0.50, QColor(140, 70, 20, 255))
-            core_grad.setColorAt(0.85, QColor(50, 20, 8, 255))
-            core_grad.setColorAt(1.00, QColor(15, 6, 2, 255))
+            core_grad.setColorAt(0.00, QColor(255, 235, 190, 255))
+            core_grad.setColorAt(0.20, QColor(230, 155, 65, 255))
+            core_grad.setColorAt(0.50, QColor(145, 75, 22, 255))
+            core_grad.setColorAt(0.85, QColor(55, 22, 9, 255))
+            core_grad.setColorAt(1.00, QColor(16, 7, 3, 255))
+        elif is_thinking:
+            core_grad.setColorAt(0.00, QColor(220, 205, 255, 255))
+            core_grad.setColorAt(0.20, QColor(130, 95, 225, 255))
+            core_grad.setColorAt(0.50, QColor(50, 25, 110, 255))
+            core_grad.setColorAt(0.85, QColor(18, 10, 45, 255))
+            core_grad.setColorAt(1.00, QColor(8, 4, 20, 255))
         else:
-            core_grad.setColorAt(0.00, QColor(240, 245, 255, 255))
-            core_grad.setColorAt(0.18, QColor(190, 205, 225, 255))
-            core_grad.setColorAt(0.40, QColor(100, 115, 138, 255))
-            core_grad.setColorAt(0.70, QColor(32, 40, 54, 255))
+            core_grad.setColorAt(0.00, QColor(245, 248, 255, 255))
+            core_grad.setColorAt(0.18, QColor(195, 210, 230, 255))
+            core_grad.setColorAt(0.40, QColor(105, 120, 142, 255))
+            core_grad.setColorAt(0.70, QColor(34, 42, 56, 255))
             core_grad.setColorAt(0.92, QColor(14, 18, 26, 255))
             core_grad.setColorAt(1.00, QColor(8, 10, 15, 255))
 
@@ -507,7 +595,7 @@ class LiquidMercuryOrb(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(path)
 
-        # ── 5. Curved 3D Liquid Horizon Reflection (Exact media_1790488969282.png) ──
+        # ── 5. Curved 3D Liquid Horizon Reflection ──
         painter.save()
         painter.setClipPath(path)
 
@@ -521,37 +609,46 @@ class LiquidMercuryOrb(QWidget):
             horizon_grad.setColorAt(0.72, QColor(135, 75, 20, 255))
             horizon_grad.setColorAt(0.88, QColor(48, 22, 8, 255))
             horizon_grad.setColorAt(1.00, QColor(18, 8, 4, 255))
+        elif is_thinking:
+            horizon_grad.setColorAt(0.00, QColor(14, 8, 28, 255))
+            horizon_grad.setColorAt(0.32, QColor(42, 22, 75, 255))
+            horizon_grad.setColorAt(0.44, QColor(180, 140, 255, 255))
+            horizon_grad.setColorAt(0.50, QColor(255, 255, 255, 255))
+            horizon_grad.setColorAt(0.58, QColor(130, 80, 240, 255))
+            horizon_grad.setColorAt(0.72, QColor(50, 25, 95, 255))
+            horizon_grad.setColorAt(0.88, QColor(22, 10, 42, 255))
+            horizon_grad.setColorAt(1.00, QColor(8, 4, 18, 255))
         else:
-            horizon_grad.setColorAt(0.00, QColor(12, 16, 24, 255))    # Obsidian top sky
-            horizon_grad.setColorAt(0.32, QColor(35, 45, 60, 255))    # Gunmetal transition
-            horizon_grad.setColorAt(0.42, QColor(135, 188, 235, 255))  # Electric cyan-blue horizon gleam
+            horizon_grad.setColorAt(0.00, QColor(12, 16, 24, 255))
+            horizon_grad.setColorAt(0.32, QColor(35, 45, 60, 255))
+            horizon_grad.setColorAt(0.42, QColor(135, 195, 240, 255))  # Electric cyan-blue horizon gleam
             horizon_grad.setColorAt(0.50, QColor(255, 255, 255, 255))  # Liquid silver-white horizon crest
-            horizon_grad.setColorAt(0.58, QColor(238, 202, 148, 255))  # Warm champagne / amber sunset
-            horizon_grad.setColorAt(0.72, QColor(95, 102, 118, 255))   # Pewter body
-            horizon_grad.setColorAt(0.88, QColor(28, 35, 48, 255))    # Deep ground reflection
-            horizon_grad.setColorAt(1.00, QColor(10, 14, 20, 255))    # Obsidian base
+            horizon_grad.setColorAt(0.58, QColor(240, 205, 150, 255))  # Warm champagne reflection
+            horizon_grad.setColorAt(0.72, QColor(95, 102, 118, 255))
+            horizon_grad.setColorAt(0.88, QColor(28, 35, 48, 255))
+            horizon_grad.setColorAt(1.00, QColor(10, 14, 20, 255))
 
         painter.setBrush(QBrush(horizon_grad))
-        painter.drawRect(QRectF(cx - rx - 5, cy - ry - 5, (rx + 5) * 2, (ry + 5) * 2))
+        painter.drawRect(QRectF(cx - rx - 8, cy - ry - 8, (rx + 8) * 2, (ry + 8) * 2))
 
-        # ── 6. 3D Fresnel Edge Rim Lighting (Volumetric Sphere Depth) ──────
+        # ── 6. 3D Fresnel Edge Rim Lighting ──
         fresnel_grad = QRadialGradient(cx, cy, rx)
         fresnel_grad.setColorAt(0.00, QColor(255, 255, 255, 0))
-        fresnel_grad.setColorAt(0.72, QColor(255, 255, 255, 0))
-        fresnel_grad.setColorAt(0.88, QColor(200, 225, 255, 60))
-        fresnel_grad.setColorAt(0.97, QColor(240, 248, 255, 175))
-        fresnel_grad.setColorAt(1.00, QColor(255, 255, 255, 230))
+        fresnel_grad.setColorAt(0.70, QColor(255, 255, 255, 0))
+        fresnel_grad.setColorAt(0.88, QColor(200, 230, 255, 65))
+        fresnel_grad.setColorAt(0.97, QColor(240, 248, 255, 180))
+        fresnel_grad.setColorAt(1.00, QColor(255, 255, 255, 235))
         painter.setBrush(QBrush(fresnel_grad))
-        painter.drawRect(QRectF(cx - rx - 5, cy - ry - 5, (rx + 5) * 2, (ry + 5) * 2))
+        painter.drawRect(QRectF(cx - rx - 8, cy - ry - 8, (rx + 8) * 2, (ry + 8) * 2))
 
-        # ── 7. Top 3D Specular Liquid Gloss Dome ──────────────────────────
+        # ── 7. Top 3D Specular Liquid Gloss Dome ──
         hi_cx = cx - rx * 0.18
         hi_cy = cy - ry * 0.38
         hi_w = rx * 0.85
         hi_h = ry * 0.46
         hi_grad = QLinearGradient(hi_cx, hi_cy - hi_h / 2, hi_cx, hi_cy + hi_h / 2)
-        hi_grad.setColorAt(0.0, QColor(255, 255, 255, 240))
-        hi_grad.setColorAt(0.5, QColor(255, 255, 255, 105))
+        hi_grad.setColorAt(0.0, QColor(255, 255, 255, 245))
+        hi_grad.setColorAt(0.5, QColor(255, 255, 255, 110))
         hi_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter.setBrush(QBrush(hi_grad))
         painter.drawEllipse(QRectF(hi_cx - hi_w / 2, hi_cy - hi_h / 2, hi_w, hi_h))
@@ -559,42 +656,52 @@ class LiquidMercuryOrb(QWidget):
         # Sharp 3D Pinpoint Hotspot
         hotspot_x = cx - rx * 0.22
         hotspot_y = cy - ry * 0.38
-        hotspot_grad = QRadialGradient(hotspot_x, hotspot_y, 4.0)
+        hotspot_grad = QRadialGradient(hotspot_x, hotspot_y, 4.2)
         hotspot_grad.setColorAt(0.0, QColor(255, 255, 255, 255))
-        hotspot_grad.setColorAt(0.6, QColor(255, 255, 255, 180))
+        hotspot_grad.setColorAt(0.6, QColor(255, 255, 255, 190))
         hotspot_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter.setBrush(QBrush(hotspot_grad))
         painter.drawEllipse(QRectF(hotspot_x - 4, hotspot_y - 4, 8, 8))
 
-        # ── 8. Bottom Rim Bounce Light (Reflected Ambient from Floor) ─────
+        # ── 8. Bottom Rim Bounce Light ──
         bounce_cy = cy + ry * 0.68
         bounce_grad = QLinearGradient(cx, bounce_cy - 4, cx, bounce_cy + 6)
         bounce_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
-        bounce_grad.setColorAt(1.0, QColor(215, 230, 248, 95))
+        bounce_grad.setColorAt(1.0, QColor(215, 235, 255, 100))
         painter.setBrush(QBrush(bounce_grad))
         painter.drawEllipse(QRectF(cx - rx * 0.62, bounce_cy - 4, rx * 1.24, 10))
 
         painter.restore()
 
-        # ── 9. Perimeter Liquid Platinum Rim (Crisp bright edge) ──────────
-        rim_pen = QPen(QColor(255, 255, 255, 220), 1.25)
+        # ── 9. Perimeter Liquid Platinum Rim ──
+        rim_pen = QPen(QColor(255, 255, 255, 225), 1.25)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(rim_pen)
         painter.drawPath(path)
 
-        # ── 10. Thinking State: Dark focus backdrop & 6 Constellation Nodes (media_1790488988537.png) ──
+        # ── 10. Thinking State: Celestial Singularity & 8 Orbit Particles ──
         if is_thinking:
-            painter.setBrush(QColor(8, 10, 16, 175))
+            painter.setBrush(QColor(8, 6, 18, 175))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPath(path)
 
-            num_beads = 6
+            # Central glowing quantum singularity
+            center_rad = 7.0 + math.sin(self.phase * 5.0) * 1.5
+            cg = QRadialGradient(cx, cy, center_rad + 3)
+            cg.setColorAt(0.0, QColor(255, 255, 255, 255))
+            cg.setColorAt(0.4, QColor(180, 140, 255, 210))
+            cg.setColorAt(1.0, QColor(90, 50, 240, 0))
+            painter.setBrush(QBrush(cg))
+            painter.drawEllipse(QRectF(cx - center_rad, cy - center_rad, center_rad * 2, center_rad * 2))
+
+            # 8 Orbiting constellation nodes with trailing alphas
+            num_beads = 8
             orb_rx = rx * 0.58
             orb_ry = ry * 0.58
-            rot_speed = self.phase * 3.5
+            rot_speed = self.phase * 3.6
 
-            bead_radii = [5.0, 4.4, 3.8, 3.2, 2.6, 2.0]
-            bead_alphas = [255, 235, 195, 150, 100, 50]
+            bead_radii = [4.8, 4.2, 3.8, 3.4, 3.0, 2.6, 2.2, 1.8]
+            bead_alphas = [255, 240, 210, 180, 145, 110, 75, 45]
 
             for i in range(num_beads):
                 ang = rot_speed + (i * 2.0 * math.pi / num_beads)
@@ -605,19 +712,32 @@ class LiquidMercuryOrb(QWidget):
 
                 bg = QRadialGradient(bx, by, br + 2.5)
                 bg.setColorAt(0.0, QColor(255, 255, 255, ba))
-                bg.setColorAt(0.6, QColor(240, 245, 255, int(ba * 0.7)))
-                bg.setColorAt(1.0, QColor(255, 255, 255, 0))
+                bg.setColorAt(0.5, QColor(200, 180, 255, int(ba * 0.8)))
+                bg.setColorAt(1.0, QColor(140, 90, 255, 0))
 
                 painter.setBrush(QBrush(bg))
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawEllipse(QRectF(bx - br - 2.5, by - br - 2.5, (br + 2.5) * 2, (br + 2.5) * 2))
-
                 painter.setBrush(QColor(255, 255, 255, ba))
                 painter.drawEllipse(QRectF(bx - br, by - br, br * 2, br * 2))
 
+        # ── 11. Click Tactile Shockwave Ripple ──
+        if self.click_ripple_alpha > 0:
+            rip_pen = QPen(QColor(0, 245, 212, self.click_ripple_alpha), 2.0)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(rip_pen)
+            r_rad = self.click_ripple_radius
+            painter.drawEllipse(QRectF(cx - r_rad, cy - r_rad, r_rad * 2, r_rad * 2))
 
-# Backward compatibility alias
-SiriGlowOrb = LiquidMercuryOrb
+
+# Backward compatibility aliases
+LiquidMercuryOrb = LiquidKateOrb
+SiriGlowOrb = LiquidKateOrb
+
+try:
+    IOrbRenderer.register(LiquidKateOrb)
+except Exception:
+    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1342,19 +1462,23 @@ class SiriWindow(QWidget):
         self._execute_query(text)
 
     def _execute_query(self, query: str):
-        if self.wake_listener:
-            self.wake_listener.pause()
-        self._add_chat_bubble(query, is_user=True)
-        self._add_to_history(query)
+        try:
+            if self.wake_listener:
+                self.wake_listener.pause()
+            self._add_chat_bubble(query, is_user=True)
+            self._add_to_history(query)
 
-        self.speaker.stop()
-        self.orb.set_state("thinking")
-        self.status_label.setText("Thinking...")
+            self.speaker.stop()
+            self.orb.set_state("thinking")
+            self.status_label.setText("Thinking...")
 
-        self._active_worker = QueryWorker(query)
-        self._active_worker.response_received.connect(self._on_query_response)
-        self._active_worker.error_occurred.connect(self._on_query_error)
-        self._active_worker.start()
+            self._active_worker = QueryWorker(query)
+            self._active_worker.response_received.connect(self._on_query_response)
+            self._active_worker.error_occurred.connect(self._on_query_error)
+            self._active_worker.start()
+        except Exception as e:
+            logger.error(f"Error launching QueryWorker: {e}")
+            self._on_query_error(str(e))
 
     def _on_query_response(self, data: dict):
         resp_msg = data.get("response") or data.get("message") or str(data)
